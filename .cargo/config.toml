@@ -1,0 +1,10 @@
+# Cross-compilation settings for building the Windows binary from Linux
+# using the LLVM-MinGW toolchain. Windows developers building natively with
+# the MSVC toolchain are unaffected by this section.
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+rustflags = ["-C", "link-arg=-static"]
+
+[target.x86_64-pc-windows-gnullvm]
+linker = "x86_64-w64-mingw32-clang"
+rustflags = ["-C", "link-arg=-static"]

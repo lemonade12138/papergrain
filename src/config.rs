@@ -1,0 +1,491 @@
+//! config.rs — configuration persistence in `%APPDATA%\PaperGrain\config.json`
+//! via a tiny self-contained JSON parser/serializer (no external crates).
+#![allow(dead_code)]
+
+use crate::win32::*;
+
+// ---------------------------------------------------------------------------
+// Minimal generic JSON value + parser
+// ---------------------------------------------------------------------------
+#[derive(Clone, Debug)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Num(f64),
+    Str(String),
+    Arr(Vec<Json>),
+    Obj(Vec<(String, Json)>),
+}
+
+impl Json {
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        if let Json::Obj(items) = self {
+            for (k, v) in items {
+                if k == key { return Some(v); }
+            }
+        }
+        None
+    }
+    pub fn as_f64(&self) -> Option<f64> {
+        if let Json::Num(n) = self { Some(*n) } else { None }
+    }
+    pub fn as_str(&self) -> Option<&str> {
+        if let Json::Str(s) = self { Some(s) } else { None }
+    }
+    pub fn as_bool(&self) -> Option<bool> {
+        if let Json::Bool(b) = self { Some(*b) } else { None }
+    }
+}
+
+struct P<'a> { b: &'a [u8], i: usize }
+
+impl<'a> P<'a> {
+    fn ws(&mut self) {
+        while self.i < self.b.len() {
+            match self.b[self.i] {
+                b' ' | b'\t' | b'\r' | b'\n' => self.i += 1,
+                _ => break,
+            }
+        }
+    }
+    fn peek(&self) -> Option<u8> {
+        if self.i < self.b.len() { Some(self.b[self.i]) } else { None }
+    }
+    fn value(&mut self) -> Option<Json> {
+        self.ws();
+        match self.peek()? {
+            b'{' => self.object(),
+            b'[' => self.array(),
+            b'"' => self.string().map(Json::Str),
+            b't' => { self.lit(b"true")?; Some(Json::Bool(true)) }
+            b'f' => { self.lit(b"false")?; Some(Json::Bool(false)) }
+            b'n' => { self.lit(b"null")?; Some(Json::Null) }
+            _ => self.number(),
+        }
+    }
+    fn lit(&mut self, l: &[u8]) -> Option<()> {
+        if self.i + l.len() <= self.b.len() && &self.b[self.i..self.i + l.len()] == l {
+            self.i += l.len();
+            Some(())
+        } else { None }
+    }
+    fn number(&mut self) -> Option<Json> {
+        let start = self.i;
+        while self.i < self.b.len() {
+            match self.b[self.i] {
+                b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9' => self.i += 1,
+                _ => break,
+            }
+        }
+        if start == self.i { return None; }
+        std::str::from_utf8(&self.b[start..self.i]).ok()?
+            .parse::<f64>().ok().map(Json::Num)
+    }
+    fn string(&mut self) -> Option<String> {
+        if self.peek()? != b'"' { return None; }
+        self.i += 1;
+        let mut out: Vec<u16> = Vec::new();
+        loop {
+            let c = *self.b.get(self.i)?;
+            self.i += 1;
+            match c {
+                b'"' => return Some(String::from_utf16_lossy(&out)),
+                b'\\' => {
+                    let e = *self.b.get(self.i)?;
+                    self.i += 1;
+                    match e {
+                        b'"' => out.push(0x22),
+                        b'\\' => out.push(0x5C),
+                        b'/' => out.push(0x2F),
+                        b'b' => out.push(0x08),
+                        b'f' => out.push(0x0C),
+                        b'n' => out.push(0x0A),
+                        b'r' => out.push(0x0D),
+                        b't' => out.push(0x09),
+                        b'u' => {
+                            let cp = self.hex4()?;
+                            if (0xD800..0xDC00).contains(&cp) {
+                                // surrogate pair?
+                                if self.b.get(self.i) == Some(&b'\\')
+                                    && self.b.get(self.i + 1) == Some(&b'u') {
+                                    self.i += 2;
+                                    let lo = self.hex4()?;
+                                    if (0xDC00..0xE000).contains(&lo) {
+                                        let c = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                        out.push(c as u16);
+                                    } else {
+                                        out.push(0xFFFD);
+                                    }
+                                } else {
+                                    out.push(0xFFFD);
+                                }
+                            } else if (0xDC00..0xE000).contains(&cp) {
+                                out.push(0xFFFD);
+                            } else {
+                                out.push(cp as u16);
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => {
+                    // multi-byte UTF-8: consume the full sequence (1-4 bytes).
+                    // Delimiters before this point are ASCII, so self.i - 1
+                    // is always a character start boundary.
+                    let start = self.i - 1;
+                    let mut end = self.i;
+                    while end < self.b.len() && (self.b[end] & 0xC0) == 0x80 {
+                        end += 1;
+                    }
+                    let s = std::str::from_utf8(&self.b[start..end]).ok()?;
+                    for u in s.encode_utf16() { out.push(u); }
+                    self.i = end;
+                }
+            }
+        }
+    }
+    fn hex4(&mut self) -> Option<u32> {
+        if self.i + 4 > self.b.len() { return None; }
+        let s = std::str::from_utf8(&self.b[self.i..self.i + 4]).ok()?;
+        self.i += 4;
+        u32::from_str_radix(s, 16).ok()
+    }
+    fn object(&mut self) -> Option<Json> {
+        self.i += 1; // {
+        let mut items = Vec::new();
+        self.ws();
+        if self.peek()? == b'}' { self.i += 1; return Some(Json::Obj(items)); }
+        loop {
+            self.ws();
+            let k = self.string()?;
+            self.ws();
+            if self.peek()? != b':' { return None; }
+            self.i += 1;
+            let v = self.value()?;
+            items.push((k, v));
+            self.ws();
+            match self.peek()? {
+                b',' => { self.i += 1; }
+                b'}' => { self.i += 1; return Some(Json::Obj(items)); }
+                _ => return None,
+            }
+        }
+    }
+    fn array(&mut self) -> Option<Json> {
+        self.i += 1; // [
+        let mut items = Vec::new();
+        self.ws();
+        if self.peek()? == b']' { self.i += 1; return Some(Json::Arr(items)); }
+        loop {
+            let v = self.value()?;
+            items.push(v);
+            self.ws();
+            match self.peek()? {
+                b',' => { self.i += 1; }
+                b']' => { self.i += 1; return Some(Json::Arr(items)); }
+                _ => return None,
+            }
+        }
+    }
+}
+
+pub fn parse_json(s: &str) -> Option<Json> {
+    let mut p = P { b: s.as_bytes(), i: 0 };
+    let v = p.value()?;
+    p.ws();
+    if p.i == p.b.len() { Some(v) } else { None }
+}
+
+fn escape_json(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+pub const TEXTURE_KINDS: [&str; 5] =
+    ["fine-grain", "craft-paper", "notebook", "parchment", "custom"];
+pub const TEXTURE_LABELS: [&str; 5] =
+    ["Fine paper grain", "Coarse craft paper", "Notebook paper lines", "Parchment / aged paper", "Custom texture\0"];
+
+#[derive(Clone)]
+pub struct Config {
+    pub version: u32,
+    pub enabled: bool,
+    pub texture: String,        // one of TEXTURE_KINDS
+    pub custom_texture: String, // absolute path (or empty)
+    pub opacity: u32,           // 10..90 (%)
+    pub intensity: u32,         // 10..100 (%)
+    pub monitors: Vec<(String, bool)>,
+    pub hotkey_mods: u32,       // MOD_CONTROL/MOD_SHIFT/... bits (without MOD_NOREPEAT)
+    pub hotkey_vk: u32,
+    pub auto_start: bool,
+    pub dark_mode: bool,
+    pub show_watermark: bool,
+    pub panel_x: i32,
+    pub panel_y: i32,
+    pub first_run: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            version: 1,
+            enabled: true,
+            texture: "fine-grain".into(),
+            custom_texture: String::new(),
+            opacity: 35,
+            intensity: 60,
+            monitors: Vec::new(),
+            hotkey_mods: MOD_CONTROL | MOD_SHIFT,
+            hotkey_vk: 'P' as u32,
+            auto_start: false,
+            dark_mode: true,
+            show_watermark: true,
+            panel_x: -1,
+            panel_y: -1,
+            first_run: true,
+        }
+    }
+}
+
+impl Config {
+    fn mods_to_string(mods: u32) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if mods & MOD_CONTROL != 0 { parts.push("Ctrl"); }
+        if mods & MOD_SHIFT != 0 { parts.push("Shift"); }
+        if mods & MOD_ALT != 0 { parts.push("Alt"); }
+        if mods & MOD_WIN != 0 { parts.push("Win"); }
+        parts.join("+")
+    }
+    fn string_to_mods(s: &str) -> u32 {
+        let mut m = 0u32;
+        let lower = s.to_lowercase();
+        for part in lower.split('+') {
+            match part.trim() {
+                "ctrl" | "control" => m |= MOD_CONTROL,
+                "shift" => m |= MOD_SHIFT,
+                "alt" => m |= MOD_ALT,
+                "win" | "super" | "meta" => m |= MOD_WIN,
+                _ => {}
+            }
+        }
+        m
+    }
+    fn key_to_vk(s: &str) -> Option<u32> {
+        let t = s.trim();
+        if t.len() == 1 {
+            let c = t.chars().next().unwrap();
+            let cu = c.to_ascii_uppercase();
+            if cu.is_ascii_alphanumeric() { return Some(cu as u32); }
+        }
+        let lower = t.to_lowercase();
+        match lower.as_str() {
+            "space" => Some(VK_SPACE),
+            _ => {
+                if let Some(rest) = lower.strip_prefix('f') {
+                    if let Ok(n) = rest.parse::<u32>() {
+                        if (1..=12).contains(&n) { return Some(0x6F + n); } // F1 = 0x70
+                    }
+                }
+                None
+            }
+        }
+    }
+    pub fn vk_to_key_name(vk: u32) -> String {
+        if (0x30..=0x39).contains(&vk) || (0x41..=0x5A).contains(&vk) {
+            return (vk as u8 as char).to_string();
+        }
+        if (0x70..=0x7B).contains(&vk) {
+            return format!("F{}", vk - 0x6F);
+        }
+        if vk == VK_SPACE { return "Space".into(); }
+        // fall back to the OS key name (scan-code based)
+        unsafe {
+            let sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+            if sc != 0 {
+                let mut buf = [0u16; 64];
+                let n = GetKeyNameTextW((sc as LPARAM) << 16, buf.as_mut_ptr(), 64);
+                if n > 0 { return from_utf16(&buf[..n as usize]); }
+            }
+        }
+        format!("Key{:02X}", vk)
+    }
+    pub fn hotkey_display(&self) -> String {
+        let mods = Self::mods_to_string(self.hotkey_mods);
+        let key = Self::vk_to_key_name(self.hotkey_vk);
+        if mods.is_empty() { key } else { format!("{}+{}", mods, key) }
+    }
+
+    pub fn monitor_enabled(&self, device: &str) -> bool {
+        for (k, v) in &self.monitors {
+            if k == device { return *v; }
+        }
+        true // unknown/new monitors default to enabled
+    }
+    pub fn set_monitor(&mut self, device: &str, enabled: bool) {
+        for (k, v) in self.monitors.iter_mut() {
+            if k == device { *v = enabled; return; }
+        }
+        self.monitors.push((device.to_string(), enabled));
+    }
+
+    // -- serialization ------------------------------------------------------
+    pub fn to_json_text(&self) -> String {
+        let mut monitors = String::from("{");
+        for (i, (k, v)) in self.monitors.iter().enumerate() {
+            if i > 0 { monitors.push(','); }
+            monitors.push_str("\n    ");
+            escape_json(k, &mut monitors);
+            monitors.push_str(": ");
+            monitors.push_str(if *v { "true" } else { "false" });
+        }
+        if !self.monitors.is_empty() { monitors.push('\n'); }
+        monitors.push('}');
+
+        let mut hotkey = String::from("{\n    \"mods\": ");
+        escape_json(&Self::mods_to_string(self.hotkey_mods), &mut hotkey);
+        hotkey.push_str(",\n    \"key\": ");
+        escape_json(&Self::vk_to_key_name(self.hotkey_vk), &mut hotkey);
+        hotkey.push_str("\n  }");
+
+        let mut t = String::new();
+        escape_json(&self.texture, &mut t);
+        let mut c = String::new();
+        escape_json(&self.custom_texture, &mut c);
+        format!(
+            "{{\n  \"version\": {},\n  \"enabled\": {},\n  \"texture\": {},\n  \"customTexture\": {},\n  \"opacity\": {},\n  \"intensity\": {},\n  \"monitors\": {},\n  \"hotkey\": {},\n  \"autoStart\": {},\n  \"darkMode\": {},\n  \"showWatermark\": {},\n  \"panelX\": {},\n  \"panelY\": {},\n  \"firstRun\": {}\n}}\n",
+            self.version, self.enabled, t, c, self.opacity, self.intensity, monitors, hotkey,
+            self.auto_start, self.dark_mode, self.show_watermark, self.panel_x, self.panel_y,
+            self.first_run
+        )
+    }
+
+    pub fn from_json_text(text: &str) -> Option<Config> {
+        let j = parse_json(text)?;
+        let mut c = Config::default();
+        if let Some(v) = j.get("version").and_then(|v| v.as_f64()) { c.version = v as u32; }
+        if let Some(v) = j.get("enabled").and_then(|v| v.as_bool()) { c.enabled = v; }
+        if let Some(v) = j.get("texture").and_then(|v| v.as_str()) {
+            if TEXTURE_KINDS.contains(&v) { c.texture = v.to_string(); }
+        }
+        if let Some(v) = j.get("customTexture").and_then(|v| v.as_str()) {
+            c.custom_texture = v.to_string();
+        }
+        if let Some(v) = j.get("opacity").and_then(|v| v.as_f64()) {
+            c.opacity = (v as i64).clamp(10, 90) as u32;
+        }
+        if let Some(v) = j.get("intensity").and_then(|v| v.as_f64()) {
+            c.intensity = (v as i64).clamp(10, 100) as u32;
+        }
+        if let Some(Json::Obj(items)) = j.get("monitors") {
+            for (k, v) in items {
+                if let Some(b) = v.as_bool() { c.monitors.push((k.clone(), b)); }
+            }
+        }
+        if let Some(h) = j.get("hotkey") {
+            let mods = h.get("mods").and_then(|v| v.as_str())
+                .map(|s| Self::string_to_mods(s)).unwrap_or(MOD_CONTROL | MOD_SHIFT);
+            let vk = h.get("key").and_then(|v| v.as_str())
+                .and_then(|s| Self::key_to_vk(s)).unwrap_or('P' as u32);
+            if mods != 0 { c.hotkey_mods = mods; }
+            c.hotkey_vk = vk;
+        }
+        if let Some(v) = j.get("autoStart").and_then(|v| v.as_bool()) { c.auto_start = v; }
+        if let Some(v) = j.get("darkMode").and_then(|v| v.as_bool()) { c.dark_mode = v; }
+        if let Some(v) = j.get("showWatermark").and_then(|v| v.as_bool()) { c.show_watermark = v; }
+        if let Some(v) = j.get("panelX").and_then(|v| v.as_f64()) { c.panel_x = v as i32; }
+        if let Some(v) = j.get("panelY").and_then(|v| v.as_f64()) { c.panel_y = v as i32; }
+        if let Some(v) = j.get("firstRun").and_then(|v| v.as_bool()) { c.first_run = v; }
+        Some(c)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File IO (Win32, wide-char)
+// ---------------------------------------------------------------------------
+pub fn read_file_text(path: &str) -> Option<String> {
+    unsafe {
+        let p = wide(path);
+        let h = CreateFileW(p.as_ptr(), GENERIC_READ, FILE_SHARE_READ,
+                            core::ptr::null(), OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                            core::ptr::null_mut());
+        if h == INVALID_HANDLE_VALUE { return None; }
+        let mut size: i64 = 0;
+        if GetFileSizeEx(h, &mut size) == 0 || size <= 0 || size > 1 << 20 {
+            CloseHandle(h);
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let mut read = 0u32;
+        let ok = ReadFile(h, buf.as_mut_ptr(), buf.len() as u32, &mut read,
+                          core::ptr::null_mut());
+        CloseHandle(h);
+        if ok == 0 { return None; }
+        buf.truncate(read as usize);
+        // strip UTF-8 BOM if present
+        if buf.starts_with(&[0xEF, 0xBB, 0xBF]) { buf.drain(0..3); }
+        String::from_utf8(buf).ok()
+    }
+}
+
+pub fn write_file_text(path: &str, text: &str) -> bool {
+    unsafe {
+        let tmp = format!("{}.tmp", path);
+        let p = wide(&tmp);
+        let h = CreateFileW(p.as_ptr(), GENERIC_WRITE, FILE_SHARE_READ,
+                            core::ptr::null(), CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                            core::ptr::null_mut());
+        if h == INVALID_HANDLE_VALUE { return false; }
+        let bytes = text.as_bytes();
+        let mut written = 0u32;
+        let ok = WriteFile(h, bytes.as_ptr(), bytes.len() as u32, &mut written,
+                           core::ptr::null_mut());
+        CloseHandle(h);
+        if ok == 0 || written as usize != bytes.len() { return false; }
+        let from = wide(&tmp);
+        let to = wide(path);
+        if MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING) == 0 {
+            // fall back to non-atomic write
+            let p2 = wide(path);
+            let h2 = CreateFileW(p2.as_ptr(), GENERIC_WRITE, FILE_SHARE_READ,
+                                 core::ptr::null(), CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                                 core::ptr::null_mut());
+            if h2 == INVALID_HANDLE_VALUE { return false; }
+            let mut w2 = 0u32;
+            let ok2 = WriteFile(h2, bytes.as_ptr(), bytes.len() as u32, &mut w2,
+                                core::ptr::null_mut());
+            CloseHandle(h2);
+            return ok2 != 0 && w2 as usize == bytes.len();
+        }
+        true
+    }
+}
+
+/// %APPDATA% path (UTF-16 env query).
+pub fn appdata_dir() -> Option<String> {
+    unsafe {
+        let name = wide("APPDATA");
+        let n = GetEnvironmentVariableW(name.as_ptr(), core::ptr::null_mut(), 0);
+        if n == 0 { return None; }
+        let mut buf = vec![0u16; n as usize + 1];
+        let n2 = GetEnvironmentVariableW(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32);
+        if n2 == 0 || n2 >= buf.len() as u32 { return None; }
+        buf.truncate(n2 as usize);
+        Some(String::from_utf16_lossy(&buf))
+    }
+}

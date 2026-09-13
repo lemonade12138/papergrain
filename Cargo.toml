@@ -1,0 +1,18 @@
+[package]
+name = "papergrain"
+version = "1.0.0"
+edition = "2021"
+description = "Ultra-lightweight paper texture overlay for Windows 10/11"
+license = "MIT"
+repository = "https://github.com/cookiefilled/papergrain"
+keywords = ["windows", "overlay", "paper", "texture", "win32"]
+publish = false
+
+# Zero external dependencies — the whole app is std + hand-written Win32 FFI.
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+panic = "unwind"
+debug = false
