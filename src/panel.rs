@@ -8,6 +8,7 @@ use crate::APP;
 use std::ffi::c_void;
 
 pub const PANEL_CLASS: &str = "PaperGrainPanelWnd";
+pub const WM_LANGUAGE_CHANGED: u32 = WM_APP + 3;
 
 // control ids
 const IDC_COMBO_TEX: u32 = 3001;
@@ -17,6 +18,7 @@ const IDC_TRACK_INT: u32 = 3004;
 const IDC_CHK_AUTOSTART: u32 = 3005;
 const IDC_CHK_DARK: u32 = 3006;
 const IDC_CHK_WATERMARK: u32 = 3007;
+const IDC_COMBO_LANG: u32 = 3008;
 const IDC_BTN_HOTKEY: u32 = 3020;
 const IDC_BTN_RESET: u32 = 3021;
 pub const IDC_MON_FIRST: u32 = 3100; // + index
@@ -68,6 +70,8 @@ pub unsafe fn panel_rebuild() {
     let scale = app.panel_scale();
     let s = |v: i32| -> i32 { (v as f32 * scale).round() as i32 };
     let font = app.msg_font;
+    let title = wide(app.cfg.text("PaperGrain 设置", "PaperGrain Settings"));
+    SetWindowTextW(panel, title.as_ptr());
 
     // destroy previous children (tracked list)
     for c in app.panel_ctls.drain(..) {
@@ -82,16 +86,26 @@ pub unsafe fn panel_rebuild() {
     let w_client = s(340);
     let mut y = s(12);
 
+    ctls.push(create_ctl("STATIC", app.cfg.text("语言", "Language"), 0, 0,
+                         x0, y + s(3), s(74), s(18), 0, panel, font));
+    let language = create_ctl("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 0,
+                              x0 + s(88), y, s(224), s(120), IDC_COMBO_LANG, panel, font);
+    for name in LANGUAGE_LABELS {
+        let name = wide(name);
+        SendMessageW(language, CB_ADDSTRING, 0, name.as_ptr() as LPARAM);
+    }
+    let selected = LANGUAGE_KINDS.iter().position(|id| *id == app.cfg.language).unwrap_or(0);
+    SendMessageW(language, CB_SETCURSEL, selected, 0);
+    ctls.push(language);
+    y += s(36);
+
     // ---- TEXTURE section ----
-    ctls.push(create_ctl("STATIC", "TEXTURE", 0, 0, x0, y, s(200), s(18), 0,
+    ctls.push(create_ctl("STATIC", app.cfg.text("纸张纹理", "TEXTURE"), 0, 0, x0, y, s(200), s(18), 0,
                          panel, font));
     y += s(22);
     let combo = create_ctl("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 0,
-                           x0, y, s(206), s(200), IDC_COMBO_TEX, panel, font);
-    let tex_names = ["Fine paper grain", "Coarse craft paper",
-                     "Notebook paper lines", "Parchment / aged paper",
-                     "Custom texture"];
-    for name in tex_names.iter() {
+                           x0, y, s(206), s(248), IDC_COMBO_TEX, panel, font);
+    for name in app.cfg.texture_labels().iter() {
         let w = wide(name);
         SendMessageW(combo, CB_ADDSTRING, 0, w.as_ptr() as LPARAM);
     }
@@ -100,7 +114,7 @@ pub unsafe fn panel_rebuild() {
     SendMessageW(combo, CB_SETCURSEL, sel as WPARAM, 0);
     ctls.push(combo);
 
-    let browse = create_ctl("BUTTON", "Browse...", WS_TABSTOP, 0,
+    let browse = create_ctl("BUTTON", app.cfg.text("选择图片...", "Browse..."), WS_TABSTOP, 0,
                             x0 + s(216), y - s(2), s(96), s(28),
                             IDC_BTN_BROWSE, panel, font);
     ctls.push(browse);
@@ -114,7 +128,7 @@ pub unsafe fn panel_rebuild() {
     y += s(30);
 
     // ---- Opacity ----
-    ctls.push(create_ctl("STATIC", "Opacity", 0, 0, x0, y, s(120), s(18), 0,
+    ctls.push(create_ctl("STATIC", app.cfg.text("不透明度", "Opacity"), 0, 0, x0, y, s(120), s(18), 0,
                          panel, font));
     let op_lbl = create_ctl("STATIC", &format!("{}%", app.cfg.opacity), 0, 0,
                             x0 + s(240), y, s(72), s(18), 0, panel, font);
@@ -130,7 +144,7 @@ pub unsafe fn panel_rebuild() {
     y += s(34);
 
     // ---- Intensity ----
-    ctls.push(create_ctl("STATIC", "Grain intensity", 0, 0, x0, y, s(160),
+    ctls.push(create_ctl("STATIC", app.cfg.text("纹理强度", "Grain intensity"), 0, 0, x0, y, s(160),
                          s(18), 0, panel, font));
     let int_lbl = create_ctl("STATIC", &format!("{}%", app.cfg.intensity), 0, 0,
                              x0 + s(240), y, s(72), s(18), 0, panel, font);
@@ -146,16 +160,13 @@ pub unsafe fn panel_rebuild() {
     y += s(36);
 
     // ---- Monitors ----
-    ctls.push(create_ctl("STATIC", "MONITORS", 0, 0, x0, y, s(200), s(18), 0,
+    ctls.push(create_ctl("STATIC", app.cfg.text("显示器", "MONITORS"), 0, 0, x0, y, s(200), s(18), 0,
                          panel, font));
     y += s(20);
     let monitors = crate::overlay::enum_monitors();
     for (i, mi) in monitors.iter().enumerate().take(16) {
-        let label = if mi.primary {
-            format!("Display {}  (primary)", i + 1)
-        } else {
-            format!("Display {}", i + 1)
-        };
+        let label = format!("{} {}{}", app.cfg.text("显示器", "Display"), i + 1,
+            if mi.primary { app.cfg.text("（主显示器）", "  (primary)") } else { "" });
         let chk = create_ctl("BUTTON", &label, BS_AUTOCHECKBOX | WS_TABSTOP,
                              0, x0, y, s(312), s(22),
                              IDC_MON_FIRST + i as u32, panel, font);
@@ -168,22 +179,22 @@ pub unsafe fn panel_rebuild() {
     y += s(8);
 
     // ---- Options ----
-    ctls.push(create_ctl("STATIC", "OPTIONS", 0, 0, x0, y, s(200), s(18), 0,
+    ctls.push(create_ctl("STATIC", app.cfg.text("其他设置", "OPTIONS"), 0, 0, x0, y, s(200), s(18), 0,
                          panel, font));
     y += s(20);
-    let chk_auto = create_ctl("BUTTON", "Run at startup",
+    let chk_auto = create_ctl("BUTTON", app.cfg.text("开机自动启动", "Run at startup"),
                               BS_AUTOCHECKBOX | WS_TABSTOP, 0, x0, y, s(312),
                               s(22), IDC_CHK_AUTOSTART, panel, font);
     SendMessageW(chk_auto, BM_SETCHECK, if app.cfg.auto_start { 1 } else { 0 }, 0);
     ctls.push(chk_auto);
     y += s(24);
-    let chk_wm = create_ctl("BUTTON", "Show \"CookieFilled\" watermark",
+    let chk_wm = create_ctl("BUTTON", app.cfg.text("显示 CookieFilled 水印", "Show \"CookieFilled\" watermark"),
                             BS_AUTOCHECKBOX | WS_TABSTOP, 0, x0, y, s(312),
                             s(22), IDC_CHK_WATERMARK, panel, font);
     SendMessageW(chk_wm, BM_SETCHECK, if app.cfg.show_watermark { 1 } else { 0 }, 0);
     ctls.push(chk_wm);
     y += s(24);
-    let chk_dark = create_ctl("BUTTON", "Dark settings theme",
+    let chk_dark = create_ctl("BUTTON", app.cfg.text("设置窗口使用深色主题", "Dark settings theme"),
                               BS_AUTOCHECKBOX | WS_TABSTOP, 0, x0, y, s(312),
                               s(22), IDC_CHK_DARK, panel, font);
     SendMessageW(chk_dark, BM_SETCHECK, if app.cfg.dark_mode { 1 } else { 0 }, 0);
@@ -191,13 +202,13 @@ pub unsafe fn panel_rebuild() {
     y += s(34);
 
     // ---- Hotkey ----
-    ctls.push(create_ctl("STATIC", "Hotkey", 0, 0, x0, y, s(60), s(18), 0,
+    ctls.push(create_ctl("STATIC", app.cfg.text("快捷键", "Hotkey"), 0, 0, x0, y, s(60), s(18), 0,
                          panel, font));
     let hk_lbl = create_ctl("STATIC", &app.cfg.hotkey_display(), 0, 0,
                             x0 + s(70), y, s(140), s(18), 0, panel, font);
     app.pnl_hotkey_lbl = hk_lbl;
     ctls.push(hk_lbl);
-    let hk_btn = create_ctl("BUTTON", "Change...", WS_TABSTOP, 0,
+    let hk_btn = create_ctl("BUTTON", app.cfg.text("修改...", "Change..."), WS_TABSTOP, 0,
                             x0 + s(216), y - s(2), s(96), s(28),
                             IDC_BTN_HOTKEY, panel, font);
     app.pnl_hotkey_btn = hk_btn;
@@ -205,18 +216,25 @@ pub unsafe fn panel_rebuild() {
     y += s(36);
 
     // ---- Reset + footer ----
-    ctls.push(create_ctl("BUTTON", "Reset defaults", WS_TABSTOP, 0,
+    ctls.push(create_ctl("BUTTON", app.cfg.text("恢复默认设置", "Reset defaults"), WS_TABSTOP, 0,
                          x0, y, s(130), s(28), IDC_BTN_RESET, panel, font));
     y += s(38);
     ctls.push(create_ctl("STATIC",
-                         "PaperGrain 1.0.0  -  MIT License  -  CookieFilled",
+                         app.cfg.text("PaperGrain 1.0.0  -  MIT 许可证  -  CookieFilled",
+                                      "PaperGrain 1.0.0  -  MIT License  -  CookieFilled"),
                          0, 0, x0, y, s(312), s(18), 0, panel, font));
     y += s(28);
 
     app.panel_ctls = ctls;
     let client_h = y.max(s(120));
     let total_w = w_client + s(28);
-    SetWindowPos(panel, core::ptr::null_mut(), 0, 0, total_w, client_h,
+    let mut window_rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let mut client_rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    GetWindowRect(panel, &mut window_rect);
+    GetClientRect(panel, &mut client_rect);
+    // Include the native title bar so the footer stays inside the client area.
+    let frame_h = (window_rect.height() - client_rect.height()).max(0);
+    SetWindowPos(panel, core::ptr::null_mut(), 0, 0, total_w, client_h + frame_h,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     panel_apply_theme();
     InvalidateRect(panel, core::ptr::null(), 1);
@@ -225,12 +243,12 @@ pub unsafe fn panel_rebuild() {
 fn custom_file_label(cfg: &Config) -> String {
     if cfg.texture == "custom" {
         if cfg.custom_texture.is_empty() {
-            "No custom texture loaded".to_string()
+            cfg.text("尚未选择自定义图片", "No custom texture loaded").to_string()
         } else {
             cfg.custom_texture.clone()
         }
     } else {
-        "Procedural texture (no file needed)".to_string()
+        cfg.text("内置纸纹，无需图片文件", "Procedural texture (no file needed)").to_string()
     }
 }
 
@@ -264,7 +282,7 @@ pub unsafe fn panel_show() {
     if app.hwnd_panel == core::ptr::null_mut() {
         let inst = GetModuleHandleW(core::ptr::null_mut());
         let cls = wide(PANEL_CLASS);
-        let title = wide("PaperGrain Settings");
+        let title = wide(app.cfg.text("PaperGrain 设置", "PaperGrain Settings"));
         app.hwnd_panel = CreateWindowExW(
             WS_EX_APPWINDOW,
             cls.as_ptr(), title.as_ptr(),
@@ -313,6 +331,10 @@ pub unsafe extern "system" fn panel_wndproc(
     hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_LANGUAGE_CHANGED => {
+            panel_rebuild();
+            0
+        }
         WM_ERASEBKGND => {
             let app = APP().get();
             if app.brush_panel == core::ptr::null_mut() { return 1; }
@@ -396,6 +418,12 @@ pub unsafe extern "system" fn panel_wndproc(
 unsafe fn handle_command(id: u32, notif: u32, ctrl: HWND) {
     let app = APP().get();
     match id {
+        IDC_COMBO_LANG if notif == CBN_SELCHANGE => {
+            let selected = SendMessageW(ctrl, CB_GETCURSEL, 0, 0) as usize;
+            if let Some(language) = LANGUAGE_KINDS.get(selected) {
+                app.set_language(language);
+            }
+        }
         IDC_COMBO_TEX if notif == CBN_SELCHANGE => {
             let sel = SendMessageW(ctrl, CB_GETCURSEL, 0, 0) as i32;
             if sel >= 0 && (sel as usize) < TEXTURE_KINDS.len() {
@@ -418,8 +446,10 @@ unsafe fn handle_command(id: u32, notif: u32, ctrl: HWND) {
         }
         IDC_BTN_HOTKEY if notif == BN_CLICKED => {
             app.capture_hotkey = true;
-            let t = wide("Press keys... (Esc cancels)");
+            let t = wide(app.cfg.text("按下按键...", "Press keys..."));
             SetWindowTextW(app.pnl_hotkey_btn, t.as_ptr());
+            let t = wide(app.cfg.text("Esc 取消", "Esc cancels"));
+            SetWindowTextW(app.pnl_hotkey_lbl, t.as_ptr());
         }
         IDC_CHK_AUTOSTART if notif == BN_CLICKED => {
             let on = SendMessageW(ctrl, BM_GETCHECK, 0, 0) != 0;
@@ -456,8 +486,10 @@ unsafe fn handle_hotkey_capture(wparam: WPARAM) {
     let vk = wparam as u32;
     if vk == VK_ESCAPE {
         app.capture_hotkey = false;
-        let t = wide("Change...");
+        let t = wide(app.cfg.text("修改...", "Change..."));
         SetWindowTextW(app.pnl_hotkey_btn, t.as_ptr());
+        let t = wide(&app.cfg.hotkey_display());
+        SetWindowTextW(app.pnl_hotkey_lbl, t.as_ptr());
         return;
     }
     if vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || vk == VK_LWIN
@@ -469,19 +501,21 @@ unsafe fn handle_hotkey_capture(wparam: WPARAM) {
         if mods & MOD_ALT != 0 { s.push_str("Alt+"); }
         if mods & MOD_WIN != 0 { s.push_str("Win+"); }
         let t = wide(&format!("{}...", s));
-        SetWindowTextW(app.pnl_hotkey_btn, t.as_ptr());
+        SetWindowTextW(app.pnl_hotkey_lbl, t.as_ptr());
         return;
     }
     let mods = live_mods();
     if mods == 0 {
-        let t = wide("Add Ctrl / Alt / Shift...");
-        SetWindowTextW(app.pnl_hotkey_btn, t.as_ptr());
+        let t = wide(app.cfg.text("需要 Ctrl/Alt/Shift", "Use Ctrl/Alt/Shift"));
+        SetWindowTextW(app.pnl_hotkey_lbl, t.as_ptr());
         return;
     }
     app.capture_hotkey = false;
-    let t = wide("Change...");
+    let t = wide(app.cfg.text("修改...", "Change..."));
     SetWindowTextW(app.pnl_hotkey_btn, t.as_ptr());
     app.try_set_hotkey(mods, vk);
+    let t = wide(&app.cfg.hotkey_display());
+    SetWindowTextW(app.pnl_hotkey_lbl, t.as_ptr());
 }
 
 fn live_mods() -> u32 {

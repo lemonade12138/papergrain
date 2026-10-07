@@ -27,9 +27,13 @@ pub fn generate(kind: &str, w: usize, h: usize, dpi: u32, intensity: u32) -> Vec
     let inten = (intensity as f32 / 100.0).clamp(0.08, 1.0);
     let mut buf = vec![0u8; w * 4 * h];
     match kind {
-        "craft-paper" => craft_paper(&mut buf, w, h, s, inten),
-        "notebook" => notebook(&mut buf, w, h, s, inten),
-        "parchment" => parchment(&mut buf, w, h, s, inten),
+        "cotton-paper" => cotton_paper(&mut buf, w, h, s, inten),
+        "drawing-paper" => drawing_paper(&mut buf, w, h, s, inten),
+        "book-paper" => book_paper(&mut buf, w, h, s, inten),
+        "recycled-paper" => recycled_paper(&mut buf, w, h, s, inten),
+        "watercolor-paper" => watercolor_paper(&mut buf, w, h, s, inten),
+        "xuan-paper" => xuan_paper(&mut buf, w, h, s, inten),
+        "offset-paper" => offset_paper(&mut buf, w, h, s, inten),
         _ => fine_grain(&mut buf, w, h, s, inten),
     }
     buf
@@ -63,130 +67,172 @@ fn fine_grain(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
 }
 
 // ---------------------------------------------------------------------------
-// Preset 2: coarse craft paper (warm kraft tint + fibers + flecks)
+// Paper surfaces: local relief and sparse fibers rather than opaque backgrounds
 // ---------------------------------------------------------------------------
-fn craft_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
-    for y in 0..h {
-        let fy = y as f32;
-        for x in 0..w {
-            let fx = x as f32;
-            let i = (y * w + x) * 4;
-            let blotch = fbm(fx * 0.0045 * s, fy * 0.0045 * s, 4, 201) - 0.5;
-            let fh = fbm(fx * 0.045 * s, fy * 0.011 * s, 2, 202);
-            let fv = fbm(fx * 0.010 * s, fy * 0.050 * s, 2, 203);
-            let fleck = hash2(x as i32, y as i32, 204);
-
-            // kraft base color, modulated by large-scale blotches
-            let (mut br, mut bg, mut bb, mut a) = (
-                194.0 + blotch * 60.0,
-                164.0 + blotch * 48.0,
-                122.0 + blotch * 30.0,
-                inten * 108.0,
-            );
-            // horizontal fibers
-            if fh > 0.60 {
-                let k = (fh - 0.60) * inten;
-                br += k * 60.0; bg += k * 70.0; bb += k * 60.0;
-                a += k * 130.0;
-            } else if fh < 0.36 {
-                let k = (0.36 - fh) * inten;
-                br -= k * 60.0; bg -= k * 55.0; bb -= k * 40.0;
-                a += k * 110.0;
-            }
-            // vertical fibers
-            if fv > 0.63 {
-                let k = (fv - 0.63) * inten;
-                br += k * 50.0; bg += k * 55.0; bb += k * 45.0;
-                a += k * 90.0;
-            }
-            // dark flecks
-            if fleck > 0.9955 {
-                br = 58.0; bg = 44.0; bb = 26.0;
-                a = inten * 190.0;
-            }
-            put_px(buf, i, bb, bg, br, a);
-        }
-    }
+fn paper_relief(buf: &mut [u8], i: usize, relief: f32, inten: f32) {
+    let a = (relief.abs() * 260.0 * inten).min(180.0);
+    let (b, g, r) = if relief >= 0.0 {
+        (255.0, 255.0, 255.0)
+    } else {
+        (72.0, 74.0, 76.0)
+    };
+    // Local light and shadow keep the underlying text clear.
+    let premul = a / 255.0;
+    put_px(buf, i, b * premul, g * premul, r * premul, a);
 }
 
-// ---------------------------------------------------------------------------
-// Preset 3: notebook paper (ruled lines + red margin + paper wash)
-// ---------------------------------------------------------------------------
-fn notebook(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
-    let spacing = (32.0 * s).max(24.0);
-    let line_th = (1.4 * s).max(1.0);
-    let margin_x = 96.0 * s;
-    let margin_th = 1.1 * s;
+fn cotton_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
     for y in 0..h {
-        let fy = y as f32;
-        let row = fy % spacing;
+        let fy = y as f32 / s;
         for x in 0..w {
-            let fx = x as f32;
-            let i = (y * w + x) * 4;
-            if row < line_th {
-                // ruled line — pale blue
-                put_px(buf, i, 235.0, 160.0, 120.0, inten * 190.0);
-            } else if (fx - margin_x).abs() < margin_th {
-                // margin line — soft red
-                put_px(buf, i, 130.0, 120.0, 235.0, inten * 205.0);
-            } else {
-                // faint paper wash + micro grain
-                let g = hash2(x as i32, y as i32, 303);
-                let a = inten * 26.0 + (g - 0.5) * inten * 22.0;
-                put_px(buf, i, 244.0, 246.0, 250.0, a);
+            let fx = x as f32 / s;
+            let formation = fbm(fx * 0.008, fy * 0.008, 2, 501) - 0.5;
+            let pulp = fbm(fx * 0.085, fy * 0.085, 2, 502) - 0.5;
+            let grain = fbm(fx * 0.64, fy * 0.64, 2, 504) - 0.5;
+            let relief = formation * 0.08 + pulp * 0.18 + grain * 0.70;
+            paper_relief(buf, (y * w + x) * 4, relief, inten);
+        }
+    }
+    paper_fibers(buf, w, h, s, inten, false);
+}
+
+fn paper_fibers(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32, long: bool) {
+    let (spacing, min_len, len_span, width, strength, seed) = if long {
+        (18.0, 3.5, 8.5, 0.5, 60.0, 905)
+    } else {
+        (12.0, 1.2, 2.8, 0.7, 75.0, 505)
+    };
+    let cell = (spacing * s).round() as usize;
+    for cy in 0..h.div_ceil(cell) {
+        for cx in 0..w.div_ceil(cell) {
+            let hash = |seed| hash2(cx as i32, cy as i32, seed);
+            let fx = (cx as f32 + hash(seed)) * cell as f32;
+            let fy = (cy as f32 + hash(seed + 1)) * cell as f32;
+            let (dy, dx) = (hash(seed + 2) * std::f32::consts::TAU).sin_cos();
+            let half_len = (min_len + hash(seed + 3) * len_span) * s;
+            let radius = half_len + s;
+            let x0 = (fx - radius).max(0.0) as usize;
+            let x1 = ((fx + radius).ceil() as usize).min(w);
+            let y0 = (fy - radius).max(0.0) as usize;
+            let y1 = ((fy + radius).ceil() as usize).min(h);
+            let color = if hash(seed + 4) > 0.5 { 255.0 } else { 80.0 };
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let px = x as f32 - fx;
+                    let py = y as f32 - fy;
+                    let along = (px * dx + py * dy).abs() / half_len;
+                    let across = (px * dy - py * dx).abs() / (width * s);
+                    let a = (1.0 - along).max(0.0) * (1.0 - across).max(0.0)
+                        * inten * strength;
+                    let i = (y * w + x) * 4;
+                    let keep = 1.0 - a / 255.0;
+                    for c in 0..3 {
+                        buf[i + c] = (color * a / 255.0 + buf[i + c] as f32 * keep) as u8;
+                    }
+                    buf[i + 3] = (a + buf[i + 3] as f32 * keep) as u8;
+                }
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Preset 4: parchment / aged paper
-// ---------------------------------------------------------------------------
-fn parchment(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
-    let edge_band = (90.0 * s).max(30.0);
+fn drawing_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
     for y in 0..h {
-        let fy = y as f32;
-        let dy_edge = (y as f32).min((h as f32 - 1.0 - fy).max(0.0));
+        let fy = y as f32 / s;
         for x in 0..w {
-            let fx = x as f32;
-            let dx_edge = fx.min((w as f32 - 1.0 - fx).max(0.0));
+            let fx = x as f32 / s;
+            let tooth = fbm(fx * 0.36, fy * 0.36, 2, 601);
+            let lit = fbm((fx - 0.8) * 0.36, (fy - 0.6) * 0.36, 2, 601);
+            let grain = fbm(fx * 0.92, fy * 0.92, 2, 602) - 0.5;
+            let formation = fbm(fx * 0.026, fy * 0.026, 2, 603) - 0.5;
+            let relief = (tooth - 0.5) * 0.52 + (lit - tooth) * 1.8
+                + grain * 0.25 + formation * 0.07;
+            paper_relief(buf, (y * w + x) * 4, relief * 0.75, inten);
+        }
+    }
+}
+
+fn book_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
+    let tint_alpha = 32.0 * inten;
+    let keep = 1.0 - tint_alpha / 255.0;
+    for y in 0..h {
+        let fy = y as f32 / s;
+        for x in 0..w {
+            let fx = x as f32 / s;
+            let pulp = fbm(fx * 0.12, fy * 0.12, 2, 701) - 0.5;
+            let grain = fbm(fx * 0.88, fy * 0.88, 2, 702) - 0.5;
             let i = (y * w + x) * 4;
-            let b1 = fbm(fx * 0.0035 * s, fy * 0.0035 * s, 4, 401);
-            let b2 = fbm(fx * 0.013 * s, fy * 0.013 * s, 3, 402);
-            let fi = fbm(fx * 0.09 * s, fy * 0.022 * s, 2, 403);
-            let edge = {
-                let d = dx_edge.min(dy_edge);
-                (1.0 - d / edge_band).clamp(0.0, 1.0)
-            };
-            // aged base: warm cream toward brown where b1 is low
-            let warm = (0.5 - b1).clamp(0.0, 1.0);
-            let mut br = 233.0 - warm * 63.0;
-            let mut bg = 216.0 - warm * 86.0;
-            let mut bb = 180.0 - warm * 100.0;
-            let mut a = inten * (76.0 + warm * 64.0);
-            // deeper stains
-            if b2 < 0.42 {
-                let k = (0.42 - b2) * inten;
-                br -= k * 113.0; bg -= k * 128.0; bb -= k * 132.0;
-                a += k * 190.0;
+            paper_relief(buf, i, pulp * 0.09 + grain * 0.38, inten);
+            // A faint ivory glaze, composited in premultiplied space.
+            for (c, color) in [222.0, 244.0, 254.0].iter().enumerate() {
+                buf[i + c] = (color * tint_alpha / 255.0 + buf[i + c] as f32 * keep) as u8;
             }
-            // edge vignette
-            if edge > 0.0 {
-                let k = edge * inten;
-                br -= k * 137.0; bg -= k * 142.0; bb -= k * 136.0;
-                a += k * 97.0;
-            }
-            // fibers
-            if fi > 0.63 {
-                let k = (fi - 0.63) * inten;
-                br += k * 22.0; bg += k * 38.0; bb += k * 55.0;
-                a += k * 90.0;
-            } else if fi < 0.34 {
-                let k = (0.34 - fi) * inten;
-                br -= k * 50.0; bg -= k * 42.0; bb -= k * 30.0;
-                a += k * 60.0;
-            }
-            put_px(buf, i, bb, bg, br, a);
+            buf[i + 3] = (tint_alpha + buf[i + 3] as f32 * keep) as u8;
+        }
+    }
+}
+
+fn recycled_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
+    for y in 0..h {
+        let fy = y as f32 / s;
+        for x in 0..w {
+            let fx = x as f32 / s;
+            let pulp = fbm(fx * 0.10, fy * 0.10, 2, 801) - 0.5;
+            let grain = fbm(fx * 0.75, fy * 0.75, 2, 802) - 0.5;
+            let inclusion = ((fbm(fx * 0.42, fy * 0.42, 2, 803) - 0.73) * 5.0)
+                .clamp(0.0, 1.0);
+            let relief = pulp * 0.32 + grain * 0.44 - inclusion * 0.45;
+            paper_relief(buf, (y * w + x) * 4, relief, inten);
+        }
+    }
+}
+
+fn watercolor_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
+    for y in 0..h {
+        let fy = y as f32 / s;
+        for x in 0..w {
+            let fx = x as f32 / s;
+            // Warp the tooth so pressed-paper pits do not form a regular grid.
+            let tx = fx + (fbm(fx * 0.027, fy * 0.027, 2, 1001) - 0.5) * 6.0;
+            let ty = fy + (fbm(fx * 0.027, fy * 0.027, 2, 1002) - 0.5) * 6.0;
+            let tooth = fbm(tx * 0.26, ty * 0.26, 2, 1003);
+            let lit = fbm((tx - 0.9) * 0.26, (ty - 0.7) * 0.26, 2, 1003);
+            let grain = fbm(fx * 0.80, fy * 0.80, 2, 1004) - 0.5;
+            let relief = (tooth - 0.5) * 0.55 + (lit - tooth) * 0.55 + grain * 0.28;
+            paper_relief(buf, (y * w + x) * 4, relief * 0.58, inten);
+        }
+    }
+}
+
+fn xuan_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
+    for y in 0..h {
+        let fy = y as f32 / s;
+        for x in 0..w {
+            let fx = x as f32 / s;
+            let formation = fbm(fx * 0.016, fy * 0.016, 2, 901) - 0.5;
+            let pulp = fbm(fx * 0.13, fy * 0.13, 2, 902) - 0.5;
+            let grain = fbm(fx * 0.70, fy * 0.70, 2, 903) - 0.5;
+            paper_relief(buf, (y * w + x) * 4,
+                         formation * 0.10 + pulp * 0.17 + grain * 0.40, inten);
+        }
+    }
+    paper_fibers(buf, w, h, s, inten, true);
+}
+
+// ---------------------------------------------------------------------------
+// Matte offset-printing stock: compressed pulp and fine, low-contrast pores.
+fn offset_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
+    for y in 0..h {
+        let fy = y as f32 / s;
+        for x in 0..w {
+            let fx = x as f32 / s;
+            let formation = fbm(fx * 0.018, fy * 0.018, 2, 1101) - 0.5;
+            let pulp = fbm(fx * 0.23, fy * 0.30, 2, 1102) - 0.5;
+            let grain = fbm(fx * 0.90, fy * 0.90, 2, 1103) - 0.5;
+            let a = (26.0 + formation * 1.5 + pulp * 4.0 + grain * 16.0) * inten;
+            let premul = a / 255.0;
+            put_px(buf, (y * w + x) * 4, 103.0 * premul, 111.0 * premul,
+                   116.0 * premul, a);
         }
     }
 }
@@ -290,4 +336,56 @@ pub fn custom_master(src: &CustomImage, w: usize, h: usize, intensity: u32) -> V
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_paper_surfaces_are_stable_distinct_and_premultiplied() {
+        for dpi in [96, 192, 288] {
+            let fine = generate("fine-grain", 128, 96, dpi, 60);
+            let mut previous = vec![fine];
+            for kind in ["cotton-paper", "drawing-paper", "book-paper", "recycled-paper",
+                         "watercolor-paper", "xuan-paper", "offset-paper"] {
+                let pixels = generate(kind, 128, 96, dpi, 60);
+                assert!(previous.iter().all(|other| other != &pixels), "duplicate preset: {kind}");
+                assert_eq!(pixels.len(), 128 * 96 * 4);
+                assert_eq!(pixels, generate(kind, 128, 96, dpi, 60));
+                assert!(pixels.chunks_exact(4).all(|p| p[..3].iter().all(|c| *c <= p[3])));
+                let alpha_sum = |intensity| -> u64 {
+                    generate(kind, 128, 96, dpi, intensity)
+                        .chunks_exact(4).map(|p| p[3] as u64).sum()
+                };
+                assert!(alpha_sum(100) > alpha_sum(60));
+                assert!(alpha_sum(60) > alpha_sum(10));
+                previous.push(pixels);
+                for (w, h) in [(0, 0), (0, 4), (4, 0), (1, 1)] {
+                    assert_eq!(generate(kind, w, h, dpi, 100).len(), w * h * 4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn offset_paper_keeps_ink_dark_and_paper_grain_subtle() {
+        for dpi in [96, 192, 288] {
+            let pixels = generate("offset-paper", 128, 96, dpi, 100);
+            let mut darkest = 255;
+            let mut lightest = 0;
+            for p in pixels.chunks_exact(4) {
+                for c in &p[..3] {
+                    let white = *c as u16 + 255 - p[3] as u16;
+                    assert!(*c <= 20, "overlay washes out dark ink");
+                    assert!(white >= 228, "paper surface is too dark");
+                }
+                let white = p[1] as u16 + 255 - p[3] as u16;
+                darkest = darkest.min(white);
+                lightest = lightest.max(white);
+            }
+            assert!(lightest - darkest <= 14, "grain is too high-contrast");
+            assert!(lightest > darkest, "paper has no visible grain");
+        }
+    }
 }

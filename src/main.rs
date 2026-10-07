@@ -143,6 +143,17 @@ impl App {
         self.render_all();
     }
 
+    pub unsafe fn set_language(&mut self, language: &str) {
+        if !self.cfg.set_language(language) { return; }
+        self.capture_hotkey = false;
+        self.save_config_soon();
+        tray::tray_update_tip(self.hwnd_main);
+        if self.hwnd_panel != core::ptr::null_mut() {
+            // Rebuild after the dropdown's selection notification has returned.
+            PostMessageW(self.hwnd_panel, panel::WM_LANGUAGE_CHANGED, 0, 0);
+        }
+    }
+
     pub unsafe fn set_opacity(&mut self, v: u32) {
         let v = v.clamp(10, 90);
         if v == self.cfg.opacity { return; }
@@ -251,7 +262,9 @@ impl App {
             let ok = RegisterHotKey(self.hwnd_main, 1,
                                     old_mods | MOD_NOREPEAT, old_vk);
             self.hotkey_registered = ok != 0;
-            self.warn("PaperGrain", "That key combination is reserved or already in use.\nPlease try another combination.");
+            self.warn("PaperGrain", self.cfg.text(
+                "这个快捷键已被占用或由系统保留，请换一个组合。",
+                "That key combination is reserved or already in use.\nPlease try another combination."));
         }
     }
 
@@ -278,8 +291,8 @@ impl App {
 
     /// Pick + load a custom texture (open file dialog, copy to appdata).
     pub unsafe fn browse_custom_texture(&mut self) {
-        let filter_parts = ["Images", "*.png;*.jpg;*.jpeg;*.bmp;*.gif",
-                            "All files", "*.*"];
+        let filter_parts = [self.cfg.text("图片", "Images"), "*.png;*.jpg;*.jpeg;*.bmp;*.gif",
+                            self.cfg.text("所有文件", "All files"), "*.*"];
         let mut filter: Vec<u16> = Vec::new();
         for p in filter_parts.iter() {
             filter.extend(p.encode_utf16());
@@ -288,7 +301,7 @@ impl App {
         filter.push(0); // double null termination
 
         let mut file_buf = vec![0u16; 4096];
-        let dlg_title = wide("Choose a paper texture");
+        let dlg_title = wide(self.cfg.text("选择纸张纹理图片", "Choose a paper texture"));
         let mut ofn: OPENFILENAMEW = std::mem::zeroed();
         ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
         ofn.hwndOwner = self.hwnd_panel;
@@ -325,8 +338,9 @@ impl App {
                 panel::panel_refresh_texture();
             }
             None => {
-                self.warn("PaperGrain",
-                          "Could not load that image as a texture.\nSupported: PNG, JPG, BMP, GIF.");
+                self.warn("PaperGrain", self.cfg.text(
+                    "无法加载这张图片。支持 PNG、JPG、BMP 和 GIF。",
+                    "Could not load that image as a texture.\nSupported: PNG, JPG, BMP, GIF."));
             }
         }
     }
@@ -499,16 +513,21 @@ unsafe fn dispatch_tray_command(cmd: u32) {
     match cmd {
         tray::ID_TOGGLE => app.toggle(),
         tray::ID_SETTINGS => panel::panel_show(),
+        tray::ID_LANG_ZH => app.set_language("zh-CN"),
+        tray::ID_LANG_EN => app.set_language("en"),
         tray::ID_ABOUT => {
             if !app.smoke {
                 let text = format!(
-                    "PaperGrain {}\nPaper texture overlay for Windows 10/11\n\n\
-                     MIT License (c) 2026 CookieFilled\n\n\
-                     Hotkey: {}\nConfiguration:\n{}\n\n\
-                     Overlays are click-through; disable before screen sharing.",
-                    APP_VERSION, app.cfg.hotkey_display(), app.config_path);
+                    "PaperGrain {}\n{}\n\n{}\n\n{}: {}\n{}:\n{}\n\n{}",
+                    APP_VERSION,
+                    app.cfg.text("Windows 10/11 屏幕纸纹工具", "Paper texture overlay for Windows 10/11"),
+                    app.cfg.text("MIT 许可证 (c) 2026 CookieFilled", "MIT License (c) 2026 CookieFilled"),
+                    app.cfg.text("快捷键", "Hotkey"), app.cfg.hotkey_display(),
+                    app.cfg.text("设置文件", "Configuration"), app.config_path,
+                    app.cfg.text("纸纹不会拦截鼠标操作；屏幕分享前可先关闭纸纹。",
+                                 "Overlays are click-through; disable before screen sharing."));
                 let t = wide(&text);
-                let c = wide("About PaperGrain");
+                let c = wide(app.cfg.text("关于 PaperGrain", "About PaperGrain"));
                 MessageBoxW(core::ptr::null_mut(), t.as_ptr(), c.as_ptr(),
                             MB_OK | MB_ICONINFORMATION);
             }
@@ -663,20 +682,21 @@ unsafe fn init_message_font(app: &mut App) {
 fn ensure_dirs(appdata: &str) -> (String, String) {
     let base = format!("{}\\PaperGrain", appdata);
     let tex = format!("{}\\textures", base);
-    unsafe {
-        let b = wide(&base);
-        SHCreateDirectoryExW(b.as_ptr(), core::ptr::null(),
-                             core::ptr::null_mut());
-        let t = wide(&tex);
-        SHCreateDirectoryExW(t.as_ptr(), core::ptr::null(),
-                             core::ptr::null_mut());
-    }
+    let _ = std::fs::create_dir_all(&tex);
     (format!("{}\\config.json", base), tex)
 }
 
 fn main() {
     unsafe {
         let smoke = std::env::args().any(|a| a == "--smoke");
+
+        let (config_path, tex_dir) = match config::appdata_dir() {
+            Some(ad) => ensure_dirs(&ad),
+            None => ("PaperGrain.json".to_string(), "textures".to_string()),
+        };
+        let cfg = config::read_file_text(&config_path)
+            .and_then(|t| Config::from_json_text(&t))
+            .unwrap_or_else(Config::default);
 
         // DPI awareness first (per-monitor v2, with dynamic fallback)
         if SetProcessDpiAwarenessContext(
@@ -693,8 +713,8 @@ fn main() {
             && GetLastError() == 183; // ERROR_ALREADY_EXISTS
         if already {
             if !smoke {
-                let t = wide(
-                    "PaperGrain is already running.\nLook for the paper-grain icon in the system tray.");
+                let t = wide(cfg.text("PaperGrain 已在运行，请在右下角找到它的图标。",
+                    "PaperGrain is already running.\nLook for the paper-grain icon in the system tray."));
                 let c = wide("PaperGrain");
                 MessageBoxW(core::ptr::null_mut(), t.as_ptr(), c.as_ptr(),
                             MB_OK | MB_ICONINFORMATION);
@@ -719,22 +739,13 @@ fn main() {
         let gdiplus_ok = GdiplusStartup(&mut token, &gp_input,
                                          core::ptr::null_mut()) == 0;
 
-        // config
-        let (config_path, tex_dir) = match config::appdata_dir() {
-            Some(ad) => ensure_dirs(&ad),
-            None => ("PaperGrain.json".to_string(), "textures".to_string()),
-        };
-        let cfg = config::read_file_text(&config_path)
-            .and_then(|t| Config::from_json_text(&t))
-            .unwrap_or_else(Config::default);
-
         // app state (before any window creation)
         let inst = GetModuleHandleW(core::ptr::null_mut());
         let app = App {
             cfg,
             config_path,
             tex_dir,
-            config_dirty: false,
+            config_dirty: true, // Persist the language default for older settings.
             smoke,
             hwnd_main: core::ptr::null_mut(),
             hwnd_panel: core::ptr::null_mut(),
@@ -783,7 +794,7 @@ fn main() {
         // tray icon
         app.app_icon = load_app_icon();
         app.tray_icon = app.app_icon;
-        tray::tray_add(app.hwnd_main, app.tray_icon);
+        if !smoke { tray::tray_add(app.hwnd_main, app.tray_icon); }
 
         // load custom texture if configured
         if app.cfg.texture == "custom" && !app.cfg.custom_texture.is_empty() {
@@ -794,9 +805,11 @@ fn main() {
         }
 
         // hotkey
-        app.hotkey_registered = RegisterHotKey(
-            app.hwnd_main, 1,
-            app.cfg.hotkey_mods | MOD_NOREPEAT, app.cfg.hotkey_vk) != 0;
+        if !smoke {
+            app.hotkey_registered = RegisterHotKey(
+                app.hwnd_main, 1,
+                app.cfg.hotkey_mods | MOD_NOREPEAT, app.cfg.hotkey_vk) != 0;
+        }
 
         // overlays for all monitors
         app.reinit_monitors();
@@ -805,8 +818,9 @@ fn main() {
         // first-run balloon
         if app.cfg.first_run && !smoke {
             tray::tray_balloon(
-                app.hwnd_main, "PaperGrain is running",
-                "Paper texture overlay is active. Right-click the tray icon to configure, or use the hotkey to toggle.");
+                app.hwnd_main, app.cfg.text("PaperGrain 已启动", "PaperGrain is running"),
+                app.cfg.text("纸纹已开启。右键点击图标可调整设置，也可用快捷键开关。",
+                    "Paper texture overlay is active. Right-click the tray icon to configure, or use the hotkey to toggle."));
             app.cfg.first_run = false;
             app.save_config_soon();
         }

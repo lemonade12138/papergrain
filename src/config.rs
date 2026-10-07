@@ -217,14 +217,25 @@ fn escape_json(s: &str, out: &mut String) {
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-pub const TEXTURE_KINDS: [&str; 5] =
-    ["fine-grain", "craft-paper", "notebook", "parchment", "custom"];
-pub const TEXTURE_LABELS: [&str; 5] =
-    ["Fine paper grain", "Coarse craft paper", "Notebook paper lines", "Parchment / aged paper", "Custom texture\0"];
+pub const TEXTURE_KINDS: [&str; 9] = [
+    "fine-grain", "cotton-paper", "drawing-paper", "book-paper",
+    "recycled-paper", "watercolor-paper", "xuan-paper", "offset-paper", "custom",
+];
+pub const TEXTURE_LABELS: [&str; 9] = [
+    "Fine paper grain", "Cotton paper", "Drawing paper", "Soft book paper",
+    "Recycled paper", "Fine watercolor paper", "Xuan paper", "Offset printing paper", "Custom texture",
+];
+pub const TEXTURE_LABELS_ZH: [&str; 9] = [
+    "细纸纹", "棉质纸", "素描纸", "柔和书纸",
+    "再生纸", "细纹水彩纸", "宣纸", "胶版印刷纸", "自定义图片",
+];
+pub const LANGUAGE_KINDS: [&str; 2] = ["zh-CN", "en"];
+pub const LANGUAGE_LABELS: [&str; 2] = ["简体中文", "English"];
 
 #[derive(Clone)]
 pub struct Config {
     pub version: u32,
+    pub language: String,
     pub enabled: bool,
     pub texture: String,        // one of TEXTURE_KINDS
     pub custom_texture: String, // absolute path (or empty)
@@ -245,6 +256,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             version: 1,
+            language: "zh-CN".into(),
             enabled: true,
             texture: "fine-grain".into(),
             custom_texture: String::new(),
@@ -264,6 +276,20 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn text(&self, chinese: &'static str, english: &'static str) -> &'static str {
+        if self.language == "en" { english } else { chinese }
+    }
+
+    pub fn texture_labels(&self) -> &'static [&'static str] {
+        if self.language == "en" { &TEXTURE_LABELS } else { &TEXTURE_LABELS_ZH }
+    }
+
+    pub fn set_language(&mut self, language: &str) -> bool {
+        if !LANGUAGE_KINDS.contains(&language) || self.language == language { return false; }
+        self.language = language.to_string();
+        true
+    }
+
     fn mods_to_string(mods: u32) -> String {
         let mut parts: Vec<&str> = Vec::new();
         if mods & MOD_CONTROL != 0 { parts.push("Ctrl"); }
@@ -367,9 +393,11 @@ impl Config {
         escape_json(&self.texture, &mut t);
         let mut c = String::new();
         escape_json(&self.custom_texture, &mut c);
+        let mut language = String::new();
+        escape_json(&self.language, &mut language);
         format!(
-            "{{\n  \"version\": {},\n  \"enabled\": {},\n  \"texture\": {},\n  \"customTexture\": {},\n  \"opacity\": {},\n  \"intensity\": {},\n  \"monitors\": {},\n  \"hotkey\": {},\n  \"autoStart\": {},\n  \"darkMode\": {},\n  \"showWatermark\": {},\n  \"panelX\": {},\n  \"panelY\": {},\n  \"firstRun\": {}\n}}\n",
-            self.version, self.enabled, t, c, self.opacity, self.intensity, monitors, hotkey,
+            "{{\n  \"version\": {},\n  \"language\": {},\n  \"enabled\": {},\n  \"texture\": {},\n  \"customTexture\": {},\n  \"opacity\": {},\n  \"intensity\": {},\n  \"monitors\": {},\n  \"hotkey\": {},\n  \"autoStart\": {},\n  \"darkMode\": {},\n  \"showWatermark\": {},\n  \"panelX\": {},\n  \"panelY\": {},\n  \"firstRun\": {}\n}}\n",
+            self.version, language, self.enabled, t, c, self.opacity, self.intensity, monitors, hotkey,
             self.auto_start, self.dark_mode, self.show_watermark, self.panel_x, self.panel_y,
             self.first_run
         )
@@ -379,6 +407,7 @@ impl Config {
         let j = parse_json(text)?;
         let mut c = Config::default();
         if let Some(v) = j.get("version").and_then(|v| v.as_f64()) { c.version = v as u32; }
+        if let Some(v) = j.get("language").and_then(|v| v.as_str()) { c.set_language(v); }
         if let Some(v) = j.get("enabled").and_then(|v| v.as_bool()) { c.enabled = v; }
         if let Some(v) = j.get("texture").and_then(|v| v.as_str()) {
             if TEXTURE_KINDS.contains(&v) { c.texture = v.to_string(); }
@@ -487,5 +516,83 @@ pub fn appdata_dir() -> Option<String> {
         if n2 == 0 || n2 >= buf.len() as u32 { return None; }
         buf.truncate(n2 as usize);
         Some(String::from_utf16_lossy(&buf))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_preset_choices_survive_config_round_trip() {
+        assert_eq!(TEXTURE_KINDS.len(), TEXTURE_LABELS.len());
+        assert_eq!(TEXTURE_KINDS.len(), TEXTURE_LABELS_ZH.len());
+        assert_eq!(TEXTURE_KINDS.last(), Some(&"custom"));
+        for (index, kind) in TEXTURE_KINDS.iter().enumerate() {
+            for language in LANGUAGE_KINDS {
+                let mut config = Config::default();
+                config.texture = (*kind).into();
+                config.set_language(language);
+                config.opacity = 42;
+                config.intensity = 75;
+                let loaded = Config::from_json_text(&config.to_json_text()).unwrap();
+                assert_eq!(loaded.texture, *kind);
+                assert_eq!(loaded.language, language);
+                assert_eq!(loaded.texture_labels()[index], config.texture_labels()[index]);
+                assert_eq!(loaded.opacity, 42);
+                assert_eq!(loaded.intensity, 75);
+            }
+        }
+    }
+
+    #[test]
+    fn removed_presets_fall_back_without_resetting_other_settings() {
+        for kind in ["craft-paper", "notebook", "parchment"] {
+            let mut config = Config::default();
+            config.texture = kind.into();
+            config.opacity = 90;
+            config.intensity = 100;
+            let loaded = Config::from_json_text(&config.to_json_text()).unwrap();
+            assert_eq!(loaded.texture, "fine-grain");
+            assert_eq!(loaded.opacity, 90);
+            assert_eq!(loaded.intensity, 100);
+            assert_eq!(crate::textures::generate(kind, 64, 48, 96, 60),
+                       crate::textures::generate("fine-grain", 64, 48, 96, 60));
+        }
+    }
+
+    #[test]
+    fn old_and_invalid_language_settings_default_to_chinese() {
+        for text in [
+            r#"{"texture":"cotton-paper","opacity":90,"intensity":100}"#,
+            r#"{"language":"unknown","texture":"cotton-paper","opacity":90,"intensity":100}"#,
+            r#"{"language":null,"texture":"cotton-paper","opacity":90,"intensity":100}"#,
+        ] {
+            let config = Config::from_json_text(text).unwrap();
+            assert_eq!(config.language, "zh-CN");
+            assert_eq!(config.texture, "cotton-paper");
+            assert_eq!(config.opacity, 90);
+            assert_eq!(config.intensity, 100);
+            assert_eq!(config.texture_labels()[1], "棉质纸");
+        }
+    }
+
+    #[test]
+    fn language_switches_and_persists_without_changing_texture_settings() {
+        let mut config = Config::default();
+        config.texture = "drawing-paper".into();
+        config.opacity = 90;
+        config.intensity = 100;
+        for (language, label) in [("en", "Drawing paper"), ("zh-CN", "素描纸")] {
+            assert!(config.set_language(language));
+            assert!(!config.set_language("unsupported"));
+            assert_eq!(config.texture_labels()[2], label);
+            let loaded = Config::from_json_text(&config.to_json_text()).unwrap();
+            assert_eq!(loaded.language, language);
+            assert_eq!(loaded.texture_labels()[2], label);
+            assert_eq!(loaded.texture, "drawing-paper");
+            assert_eq!(loaded.opacity, 90);
+            assert_eq!(loaded.intensity, 100);
+        }
     }
 }

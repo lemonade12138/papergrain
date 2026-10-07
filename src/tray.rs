@@ -11,8 +11,8 @@ pub const TRAY_UID: u32 = 1;
 
 // menu command ids
 pub const ID_TOGGLE: u32 = 2001;
-pub const ID_TEX_FIRST: u32 = 2101; // ..2104 presets, 2105 custom
-pub const ID_TEX_CUSTOM: u32 = 2105;
+pub const ID_TEX_FIRST: u32 = 2101;
+pub const ID_TEX_CUSTOM: u32 = ID_TEX_FIRST + TEXTURE_KINDS.len() as u32 - 1;
 pub const ID_OPACITY_FIRST: u32 = 2201; // 10%,20%,...,90% -> 2201..2209
 pub const ID_MON_FIRST: u32 = 2300; // + index
 pub const ID_SETTINGS: u32 = 2401;
@@ -21,6 +21,8 @@ pub const ID_WATERMARK: u32 = 2406;
 pub const ID_DARKMODE: u32 = 2403;
 pub const ID_ABOUT: u32 = 2404;
 pub const ID_EXIT: u32 = 2405;
+pub const ID_LANG_ZH: u32 = 2410;
+pub const ID_LANG_EN: u32 = 2411;
 
 // ---------------------------------------------------------------------------
 // Icon add / modify / remove
@@ -41,13 +43,13 @@ unsafe fn fill_nid(nid: &mut NOTIFYICONDATAW, hwnd: HWND, icon: HICON) {
 
 unsafe fn tray_tip_text() -> String {
     let app = APP().get();
-    let state = if app.cfg.enabled { "ON" } else { "OFF" };
+    let state = if app.cfg.enabled { app.cfg.text("已开启", "ON") } else { app.cfg.text("已关闭", "OFF") };
     let mut t = format!("PaperGrain - {} ({})", state, app.cfg.hotkey_display());
     if !app.hotkey_registered {
-        t = format!("PaperGrain - {} (hotkey unavailable)", state);
+        t = format!("PaperGrain - {} ({})", state, app.cfg.text("快捷键不可用", "hotkey unavailable"));
     }
     if t.chars().count() > 60 {
-        t = "PaperGrain - paper texture overlay".into();
+        t = app.cfg.text("PaperGrain - 屏幕纸纹", "PaperGrain - paper texture overlay").into();
     }
     t
 }
@@ -109,13 +111,10 @@ unsafe extern "system" {
 pub unsafe fn build_tray_menu() -> HMENU {
     let app = APP().get();
     let m = CreatePopupMenu();
-    let tex_labels = [
-        "Fine paper grain", "Coarse craft paper",
-        "Notebook paper lines", "Parchment / aged paper",
-    ];
+    let tex_labels = &app.cfg.texture_labels()[..TEXTURE_KINDS.len() - 1];
 
     append(m, MF_STRING | if app.cfg.enabled { MF_CHECKED } else { 0 },
-           ID_TOGGLE as usize, "Enabled (overlay on)");
+           ID_TOGGLE as usize, app.cfg.text("启用纸纹", "Enabled (overlay on)"));
     append(m, MF_SEPARATOR, 0, "");
 
     // Texture submenu
@@ -124,7 +123,7 @@ pub unsafe fn build_tray_menu() -> HMENU {
     for (i, label) in tex_labels.iter().enumerate() {
         append(tex, MF_STRING, (ID_TEX_FIRST + i as u32) as usize, label);
     }
-    append(tex, MF_STRING, ID_TEX_CUSTOM as usize, "Custom...");
+    append(tex, MF_STRING, ID_TEX_CUSTOM as usize, app.cfg.text("自定义图片...", "Custom..."));
     if app.cfg.texture == "custom" {
         sel_id = ID_TEX_CUSTOM;
     } else {
@@ -134,12 +133,12 @@ pub unsafe fn build_tray_menu() -> HMENU {
         }
     }
     CheckMenuRadioItem(tex, ID_TEX_FIRST, ID_TEX_CUSTOM, sel_id, MF_BYCOMMAND);
-    append(m, MF_POPUP, tex as usize, "Texture");
+    append(m, MF_POPUP, tex as usize, app.cfg.text("纸张纹理", "Texture"));
 
     // Opacity submenu
     let op = CreatePopupMenu();
     append(op, MF_STRING | MF_GRAYED, 0,
-           &format!("Current: {}%", app.cfg.opacity));
+           &format!("{}: {}%", app.cfg.text("当前", "Current"), app.cfg.opacity));
     append(op, MF_SEPARATOR, 0, "");
     for i in 0..9u32 {
         let v = (i + 1) * 10;
@@ -151,47 +150,53 @@ pub unsafe fn build_tray_menu() -> HMENU {
         CheckMenuRadioItem(op, ID_OPACITY_FIRST, ID_OPACITY_FIRST + 8,
                            ID_OPACITY_FIRST + idx, MF_BYCOMMAND);
     }
-    append(m, MF_POPUP, op as usize, "Opacity");
+    append(m, MF_POPUP, op as usize, app.cfg.text("不透明度", "Opacity"));
 
     // Monitors submenu
     let mon = CreatePopupMenu();
     let monitors = crate::overlay::enum_monitors();
     if monitors.is_empty() {
-        append(mon, MF_STRING | MF_GRAYED, 0, "(no monitors)");
+        append(mon, MF_STRING | MF_GRAYED, 0, app.cfg.text("（未检测到显示器）", "(no monitors)"));
     } else {
         for (i, mi) in monitors.iter().enumerate().take(16) {
             let label = if mi.primary {
-                format!("{}  (primary)", short_name(&mi.device))
+                format!("{}{}", short_name(&mi.device, &app.cfg), app.cfg.text("（主显示器）", "  (primary)"))
             } else {
-                short_name(&mi.device)
+                short_name(&mi.device, &app.cfg)
             };
             let flags = MF_STRING
                 | if app.cfg.monitor_enabled(&mi.device) { MF_CHECKED } else { 0 };
             append(mon, flags, (ID_MON_FIRST + i as u32) as usize, &label);
         }
     }
-    append(m, MF_POPUP, mon as usize, "Monitors");
+    append(m, MF_POPUP, mon as usize, app.cfg.text("显示器", "Monitors"));
 
     append(m, MF_SEPARATOR, 0, "");
-    append(m, MF_STRING, ID_SETTINGS as usize, "Settings...");
+    append(m, MF_STRING, ID_SETTINGS as usize, app.cfg.text("设置...", "Settings..."));
+    let language = CreatePopupMenu();
+    append(language, MF_STRING, ID_LANG_ZH as usize, LANGUAGE_LABELS[0]);
+    append(language, MF_STRING, ID_LANG_EN as usize, LANGUAGE_LABELS[1]);
+    let selected = if app.cfg.language == "en" { ID_LANG_EN } else { ID_LANG_ZH };
+    CheckMenuRadioItem(language, ID_LANG_ZH, ID_LANG_EN, selected, MF_BYCOMMAND);
+    append(m, MF_POPUP, language as usize, app.cfg.text("语言", "Language"));
     append(m, MF_STRING | if app.cfg.auto_start { MF_CHECKED } else { 0 },
-           ID_AUTOSTART as usize, "Run at startup");
+           ID_AUTOSTART as usize, app.cfg.text("开机自动启动", "Run at startup"));
     append(m, MF_STRING | if app.cfg.show_watermark { MF_CHECKED } else { 0 },
-           ID_WATERMARK as usize, "Show watermark");
+           ID_WATERMARK as usize, app.cfg.text("显示水印", "Show watermark"));
     append(m, MF_STRING | if app.cfg.dark_mode { MF_CHECKED } else { 0 },
-           ID_DARKMODE as usize, "Dark settings theme");
+           ID_DARKMODE as usize, app.cfg.text("设置窗口使用深色主题", "Dark settings theme"));
     append(m, MF_SEPARATOR, 0, "");
-    append(m, MF_STRING, ID_ABOUT as usize, "About PaperGrain");
-    append(m, MF_STRING, ID_EXIT as usize, "Exit");
+    append(m, MF_STRING, ID_ABOUT as usize, app.cfg.text("关于 PaperGrain", "About PaperGrain"));
+    append(m, MF_STRING, ID_EXIT as usize, app.cfg.text("退出", "Exit"));
     m
 }
 
-fn short_name(device: &str) -> String {
+fn short_name(device: &str, cfg: &Config) -> String {
     // "\\.\DISPLAY1" -> "Display 1"
     let d = device.trim_start_matches("\\\\.\\");
     let num: String = d.chars().filter(|c| c.is_ascii_digit()).collect();
     let _ = d;
-    if num.is_empty() { device.to_string() } else { format!("Display {}", num) }
+    if num.is_empty() { device.to_string() } else { format!("{} {}", cfg.text("显示器", "Display"), num) }
 }
 
 /// Show the context menu at the cursor; returns the selected command id

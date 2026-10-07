@@ -17,7 +17,7 @@ WHAT TO KNOW
   (Ctrl+Shift+P) - screen capture tools will otherwise record the texture.
 - Settings are stored in %APPDATA%\PaperGrain\config.json.
 - Custom textures (PNG/JPG/BMP/GIF) can be loaded via Settings -> Browse.
-  The four preset textures are procedural - no image files are needed.
+  The eight preset textures are procedural - no image files are needed.
 - No network access. No telemetry. MIT licensed open source.
 
 UNINSTALL

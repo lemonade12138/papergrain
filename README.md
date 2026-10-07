@@ -1,5 +1,24 @@
 # PaperGrain
 
+## 中文修改版
+
+本仓库是 [CookieFilled/PaperGrain](https://github.com/CookieFilled/papergrain)
+的个人修改版，保留原作者署名及 MIT 许可证。
+
+- 默认简体中文，可在设置顶部或右键菜单中切换 English，语言选择会自动保存。
+- 八种内置纸纹：细纸纹、棉质纸、素描纸、柔和书纸、再生纸、细纹水彩纸、宣纸、胶版印刷纸。
+- 保留原版第一个细纸纹，移除粗牛皮纸、横线笔记纸及旧羊皮纸；仍支持自定义图片。
+- 胶版印刷纸模拟微暖白、细密哑光的普通书页，不改变原有字体或排版。
+- 纸纹仅提供视觉效果，不宣称医学护眼功效。
+
+[下载 Windows 便携版（附完整源码）](https://github.com/lemonade12138/papergrain/releases/tag/v1.0.0-zh-paper.1)
+
+解压后运行 `PaperGrain.exe`，在右下角程序图标的“纸张纹理”中选择纸张类型。
+
+![胶版印刷纸与白底、原版细纸纹对比](https://github.com/lemonade12138/papergrain/releases/download/v1.0.0-zh-paper.1/PaperGrain-Offset-Paper-Preview.png)
+
+## English Overview
+
 **Ultra-lightweight paper texture overlay for Windows 10/11.**
 Native Rust · Win32 layered-window engine · zero runtime dependencies · MIT License.
 
@@ -23,9 +42,12 @@ Runtime dependencies   none          (no WebView2, no .NET, no VC++ redistributa
 
 - **Transparent full-screen overlay** (per-pixel alpha, click-through,
   always-on-top, no taskbar presence)
-- **Four procedural texture presets** — fine paper grain, coarse craft paper,
-  notebook paper lines, parchment / aged paper — generated at your monitor's
-  native resolution and DPI
+- **Eight procedural texture presets** — fine paper grain, cotton paper,
+  drawing paper, soft book paper, recycled paper, fine watercolor paper,
+  Xuan paper, and offset printing paper — generated at your monitor's native
+  resolution and DPI
+- **Language** — Simplified Chinese by default; switch instantly to English
+  in Settings or the tray menu. The selection is saved across restarts.
 - **Custom textures** — load any PNG / JPG / BMP / GIF (tiled if small,
   cover-scaled if large)
 - **Adjustable opacity** — 10%–90% in 1% steps
@@ -83,6 +105,7 @@ Everything lives in a single human-readable JSON file:
 ```json
 {
   "version": 1,
+  "language": "zh-CN",
   "enabled": true,
   "texture": "fine-grain",
   "opacity": 35,
