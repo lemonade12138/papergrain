@@ -78,13 +78,6 @@ such as `TrackPopupMenu`/`MessageBox` while a borrow is held). The pattern is
 memory-safe here because there is exactly one thread and no aliasing
 *within* a single statement.
 
-## Watermark
-
-"CookieFilled" is rasterized once per DPI via `DrawTextW` into a temporary
-DIB (white on black), thresholded into a stamp, and stamped at 5% alpha
-(13/255) into the primary monitor's overlay, 16 px (DPI-scaled) from the
-bottom-right corner.
-
 ## Build details
 
 - Target: `x86_64-pc-windows-gnullvm` (Rust + LLVM-MinGW, SEH unwinding,

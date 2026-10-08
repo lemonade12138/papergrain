@@ -231,6 +231,13 @@ pub const TEXTURE_LABELS_ZH: [&str; 9] = [
 ];
 pub const LANGUAGE_KINDS: [&str; 2] = ["zh-CN", "en"];
 pub const LANGUAGE_LABELS: [&str; 2] = ["简体中文", "English"];
+pub const THEME_KINDS: [&str; 3] = ["system", "light", "dark"];
+pub const THEME_LABELS: [&str; 3] = ["Follow system", "Light", "Dark"];
+pub const THEME_LABELS_ZH: [&str; 3] = ["跟随系统", "浅色", "深色"];
+pub const FILTER_KINDS: [&str; 4] = ["yellow", "green", "amber", "custom"];
+pub const FILTER_LABELS: [&str; 4] = ["Yellow", "Green", "Amber", "Custom"];
+pub const FILTER_LABELS_ZH: [&str; 4] = ["柔黄", "浅绿", "琥珀", "自定义"];
+pub const FILTER_COLORS: [COLORREF; 3] = [RGB(250, 223, 144), RGB(160, 218, 166), RGB(244, 179, 88)];
 
 #[derive(Clone)]
 pub struct Config {
@@ -239,14 +246,17 @@ pub struct Config {
     pub enabled: bool,
     pub texture: String,        // one of TEXTURE_KINDS
     pub custom_texture: String, // absolute path (or empty)
-    pub opacity: u32,           // 10..90 (%)
+    pub opacity: u32,           // 10..100 (%)
     pub intensity: u32,         // 10..100 (%)
+    pub filter_enabled: bool,
+    pub filter_kind: String,
+    pub filter_depth: u32,      // 0..100; relative strength, not opaque coverage
+    pub filter_custom_color: COLORREF,
     pub monitors: Vec<(String, bool)>,
     pub hotkey_mods: u32,       // MOD_CONTROL/MOD_SHIFT/... bits (without MOD_NOREPEAT)
     pub hotkey_vk: u32,
     pub auto_start: bool,
-    pub dark_mode: bool,
-    pub show_watermark: bool,
+    pub theme: String,
     pub panel_x: i32,
     pub panel_y: i32,
     pub first_run: bool,
@@ -262,12 +272,15 @@ impl Default for Config {
             custom_texture: String::new(),
             opacity: 35,
             intensity: 60,
+            filter_enabled: false,
+            filter_kind: "yellow".into(),
+            filter_depth: 25,
+            filter_custom_color: FILTER_COLORS[0],
             monitors: Vec::new(),
             hotkey_mods: MOD_CONTROL | MOD_SHIFT,
             hotkey_vk: 'P' as u32,
             auto_start: false,
-            dark_mode: true,
-            show_watermark: true,
+            theme: "system".into(),
             panel_x: -1,
             panel_y: -1,
             first_run: true,
@@ -288,6 +301,57 @@ impl Config {
         if !LANGUAGE_KINDS.contains(&language) || self.language == language { return false; }
         self.language = language.to_string();
         true
+    }
+
+    pub fn theme_labels(&self) -> &'static [&'static str] {
+        if self.language == "en" { &THEME_LABELS } else { &THEME_LABELS_ZH }
+    }
+
+    pub fn set_theme(&mut self, theme: &str) -> bool {
+        if !THEME_KINDS.contains(&theme) || self.theme == theme { return false; }
+        self.theme = theme.to_string();
+        true
+    }
+
+    pub fn theme_is_dark(&self, system_dark: bool) -> bool {
+        match self.theme.as_str() {
+            "dark" => true,
+            "light" => false,
+            _ => system_dark,
+        }
+    }
+
+    pub fn filter_labels(&self) -> &'static [&'static str] {
+        if self.language == "en" { &FILTER_LABELS } else { &FILTER_LABELS_ZH }
+    }
+
+    pub fn set_filter_kind(&mut self, kind: &str) -> bool {
+        if !FILTER_KINDS.contains(&kind) || self.filter_kind == kind { return false; }
+        self.filter_kind = kind.to_string();
+        true
+    }
+
+    pub fn filter_color(&self) -> COLORREF {
+        FILTER_KINDS.iter().position(|kind| *kind == self.filter_kind)
+            .and_then(|index| FILTER_COLORS.get(index).copied())
+            .unwrap_or(self.filter_custom_color)
+    }
+
+    pub fn filter_active(&self) -> bool { self.filter_enabled && self.filter_depth > 0 }
+
+    pub fn overlay_enabled(&self, device: &str) -> bool {
+        self.monitor_enabled(device) && (self.enabled || self.filter_active())
+    }
+
+    pub fn color_to_hex(color: COLORREF) -> String {
+        format!("#{:02X}{:02X}{:02X}", color & 255, (color >> 8) & 255, (color >> 16) & 255)
+    }
+
+    fn color_from_hex(text: &str) -> Option<COLORREF> {
+        let hex = text.strip_prefix('#')?;
+        if hex.len() != 6 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) { return None; }
+        let rgb = u32::from_str_radix(hex, 16).ok()?;
+        Some(RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255))
     }
 
     fn mods_to_string(mods: u32) -> String {
@@ -395,10 +459,17 @@ impl Config {
         escape_json(&self.custom_texture, &mut c);
         let mut language = String::new();
         escape_json(&self.language, &mut language);
+        let mut theme = String::new();
+        escape_json(&self.theme, &mut theme);
+        let mut filter_kind = String::new();
+        escape_json(&self.filter_kind, &mut filter_kind);
+        let filter = format!(
+            "{{\n    \"enabled\": {},\n    \"color\": {},\n    \"depth\": {},\n    \"customColor\": \"{}\"\n  }}",
+            self.filter_enabled, filter_kind, self.filter_depth, Self::color_to_hex(self.filter_custom_color));
         format!(
-            "{{\n  \"version\": {},\n  \"language\": {},\n  \"enabled\": {},\n  \"texture\": {},\n  \"customTexture\": {},\n  \"opacity\": {},\n  \"intensity\": {},\n  \"monitors\": {},\n  \"hotkey\": {},\n  \"autoStart\": {},\n  \"darkMode\": {},\n  \"showWatermark\": {},\n  \"panelX\": {},\n  \"panelY\": {},\n  \"firstRun\": {}\n}}\n",
-            self.version, language, self.enabled, t, c, self.opacity, self.intensity, monitors, hotkey,
-            self.auto_start, self.dark_mode, self.show_watermark, self.panel_x, self.panel_y,
+            "{{\n  \"version\": {},\n  \"language\": {},\n  \"enabled\": {},\n  \"texture\": {},\n  \"customTexture\": {},\n  \"opacity\": {},\n  \"intensity\": {},\n  \"colorFilter\": {},\n  \"monitors\": {},\n  \"hotkey\": {},\n  \"autoStart\": {},\n  \"theme\": {},\n  \"panelX\": {},\n  \"panelY\": {},\n  \"firstRun\": {}\n}}\n",
+            self.version, language, self.enabled, t, c, self.opacity, self.intensity, filter, monitors, hotkey,
+            self.auto_start, theme, self.panel_x, self.panel_y,
             self.first_run
         )
     }
@@ -416,10 +487,18 @@ impl Config {
             c.custom_texture = v.to_string();
         }
         if let Some(v) = j.get("opacity").and_then(|v| v.as_f64()) {
-            c.opacity = (v as i64).clamp(10, 90) as u32;
+            c.opacity = (v as i64).clamp(10, 100) as u32;
         }
         if let Some(v) = j.get("intensity").and_then(|v| v.as_f64()) {
             c.intensity = (v as i64).clamp(10, 100) as u32;
+        }
+        if let Some(filter) = j.get("colorFilter") {
+            if let Some(v) = filter.get("enabled").and_then(|v| v.as_bool()) { c.filter_enabled = v; }
+            if let Some(v) = filter.get("color").and_then(|v| v.as_str()) { c.set_filter_kind(v); }
+            if let Some(v) = filter.get("depth").and_then(|v| v.as_f64()) { c.filter_depth = (v as i64).clamp(0, 100) as u32; }
+            if let Some(v) = filter.get("customColor").and_then(|v| v.as_str()).and_then(Self::color_from_hex) {
+                c.filter_custom_color = v;
+            }
         }
         if let Some(Json::Obj(items)) = j.get("monitors") {
             for (k, v) in items {
@@ -435,8 +514,8 @@ impl Config {
             c.hotkey_vk = vk;
         }
         if let Some(v) = j.get("autoStart").and_then(|v| v.as_bool()) { c.auto_start = v; }
-        if let Some(v) = j.get("darkMode").and_then(|v| v.as_bool()) { c.dark_mode = v; }
-        if let Some(v) = j.get("showWatermark").and_then(|v| v.as_bool()) { c.show_watermark = v; }
+        // Old darkMode settings migrate to automatic appearance, without resetting paper settings.
+        if let Some(v) = j.get("theme").and_then(|v| v.as_str()) { c.set_theme(v); }
         if let Some(v) = j.get("panelX").and_then(|v| v.as_f64()) { c.panel_x = v as i32; }
         if let Some(v) = j.get("panelY").and_then(|v| v.as_f64()) { c.panel_y = v as i32; }
         if let Some(v) = j.get("firstRun").and_then(|v| v.as_bool()) { c.first_run = v; }
@@ -522,6 +601,109 @@ pub fn appdata_dir() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opacity_accepts_full_strength_and_preserves_it_after_reload() {
+        for (input, expected) in [(0, 10), (90, 90), (95, 95), (100, 100), (101, 100)] {
+            let text = format!(r#"{{"opacity":{input},"texture":"xuan-paper","intensity":77}}"#);
+            let cfg = Config::from_json_text(&text).unwrap();
+            assert_eq!(cfg.opacity, expected);
+            let loaded = Config::from_json_text(&cfg.to_json_text()).unwrap();
+            assert_eq!(loaded.opacity, expected);
+            assert_eq!(loaded.texture, "xuan-paper");
+            assert_eq!(loaded.intensity, 77);
+        }
+    }
+
+    #[test]
+    fn obsolete_watermark_setting_is_ignored_without_resetting_preferences() {
+        for enabled in [false, true] {
+            let cfg = Config::from_json_text(&format!(
+                r#"{{"showWatermark":{enabled},"language":"en","theme":"dark","texture":"xuan-paper","opacity":90,"intensity":100,"colorFilter":{{"enabled":true,"color":"green","depth":77}}}}"#
+            )).unwrap();
+            assert_eq!(cfg.language, "en");
+            assert_eq!(cfg.theme, "dark");
+            assert_eq!(cfg.texture, "xuan-paper");
+            assert_eq!((cfg.opacity, cfg.intensity), (90, 100));
+            assert!(cfg.filter_enabled);
+            assert_eq!(cfg.filter_kind, "green");
+            assert_eq!(cfg.filter_depth, 77);
+            assert!(parse_json(&cfg.to_json_text()).unwrap().get("showWatermark").is_none());
+        }
+    }
+
+    #[test]
+    fn independent_filter_defaults_validates_and_preserves_settings() {
+        let mut cfg = Config::from_json_text(
+            r#"{"enabled":false,"texture":"offset-paper","opacity":90,"intensity":100,"language":"en","theme":"dark"}"#
+        ).unwrap();
+        assert!(!cfg.filter_enabled);
+        assert_eq!(cfg.filter_kind, "yellow");
+        assert_eq!(cfg.filter_depth, 25);
+        assert!(!cfg.overlay_enabled("display"));
+        cfg.filter_enabled = true;
+        assert!(cfg.overlay_enabled("display"));
+        cfg.set_monitor("display", false);
+        assert!(!cfg.overlay_enabled("display"));
+        cfg.filter_depth = 0;
+        assert!(!cfg.filter_active());
+        cfg.filter_depth = 83;
+        cfg.filter_custom_color = RGB(128, 195, 97);
+        for kind in FILTER_KINDS {
+            cfg.set_filter_kind(kind);
+            assert!(!cfg.set_filter_kind("invalid"));
+            let loaded = Config::from_json_text(&cfg.to_json_text()).unwrap();
+            assert_eq!(loaded.filter_kind, kind);
+            assert_eq!(loaded.filter_color(), cfg.filter_color());
+            assert_eq!(loaded.filter_custom_color, RGB(128, 195, 97));
+            assert_eq!(loaded.filter_depth, 83);
+            assert!(loaded.filter_enabled);
+            assert!(!loaded.enabled);
+            assert_eq!(loaded.texture, "offset-paper");
+            assert_eq!((loaded.opacity, loaded.intensity), (90, 100));
+            assert_eq!((loaded.language.as_str(), loaded.theme.as_str()), ("en", "dark"));
+        }
+        for invalid in ["", "#FFF", "#GG1234", "#12345678", "#中文测试", "red"] {
+            assert_eq!(Config::color_from_hex(invalid), None);
+        }
+        for (depth, expected) in [(-1, 0), (1000, 100)] {
+            let loaded = Config::from_json_text(&format!(
+                r##"{{"colorFilter":{{"enabled":true,"color":"unknown","depth":{depth},"customColor":"#FFFFZZ"}}}}"##
+            )).unwrap();
+            assert_eq!(loaded.filter_kind, "yellow");
+            assert_eq!(loaded.filter_custom_color, FILTER_COLORS[0]);
+            assert_eq!(loaded.filter_depth, expected);
+        }
+        assert_eq!(FILTER_KINDS.len(), FILTER_LABELS.len());
+        assert_eq!(FILTER_KINDS.len(), FILTER_LABELS_ZH.len());
+    }
+
+    #[test]
+    fn appearance_defaults_migrates_and_resolves_system_mode() {
+        for text in [r#"{}"#, r#"{"darkMode":true}"#, r#"{"darkMode":false}"#,
+                     r#"{"theme":"unknown"}"#, r#"{"theme":null}"#] {
+            let config = Config::from_json_text(text).unwrap();
+            assert_eq!(config.theme, "system");
+            assert!(!config.theme_is_dark(false));
+            assert!(config.theme_is_dark(true));
+        }
+        let mut config = Config::from_json_text(
+            r#"{"darkMode":true,"texture":"cotton-paper","opacity":90,"intensity":77}"#
+        ).unwrap();
+        for (theme, light_system, dark_system) in
+            [("dark", true, true), ("light", false, false), ("system", false, true)] {
+            assert!(config.set_theme(theme));
+            assert!(!config.set_theme("invalid"));
+            let loaded = Config::from_json_text(&config.to_json_text()).unwrap();
+            assert_eq!(loaded.theme, theme);
+            assert_eq!(loaded.theme_is_dark(false), light_system);
+            assert_eq!(loaded.theme_is_dark(true), dark_system);
+            assert_eq!(loaded.texture, "cotton-paper");
+            assert_eq!((loaded.opacity, loaded.intensity), (90, 77));
+        }
+        assert_eq!(THEME_KINDS.len(), THEME_LABELS.len());
+        assert_eq!(THEME_KINDS.len(), THEME_LABELS_ZH.len());
+    }
 
     #[test]
     fn new_preset_choices_survive_config_round_trip() {

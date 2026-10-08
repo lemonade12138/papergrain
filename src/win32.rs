@@ -35,6 +35,7 @@ pub type LPARAM = isize;
 pub type ATOM = u16;
 pub type COLORREF = u32;
 pub type LONG_PTR = isize;
+pub type SUBCLASSPROC = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM, usize, usize) -> LRESULT;
 
 pub const TRUE: BOOL = 1;
 pub const FALSE: BOOL = 0;
@@ -42,7 +43,7 @@ pub const FALSE: BOOL = 0;
 pub fn HIWORD(w: usize) -> u32 { ((w >> 16) & 0xFFFF) as u32 }
 pub fn LOWORD(w: usize) -> u32 { (w & 0xFFFF) as u32 }
 pub fn MAKELPARAM(lo: u32, hi: u32) -> LPARAM { (lo as usize | ((hi as usize) << 16)) as isize }
-pub fn RGB(r: u32, g: u32, b: u32) -> COLORREF { r | (g << 8) | (b << 16) }
+pub const fn RGB(r: u32, g: u32, b: u32) -> COLORREF { r | (g << 8) | (b << 16) }
 
 // ---------------------------------------------------------------------------
 // Structures
@@ -136,6 +137,13 @@ pub struct OPENFILENAMEW {
 }
 
 #[repr(C)]
+pub struct CHOOSECOLORW {
+    pub lStructSize: u32, pub hwndOwner: HWND, pub hInstance: HWND,
+    pub rgbResult: COLORREF, pub lpCustColors: *mut COLORREF, pub Flags: u32,
+    pub lCustData: LPARAM, pub lpfnHook: *const c_void, pub lpTemplateName: *const u16,
+}
+
+#[repr(C)]
 pub struct LOGFONTW {
     pub lfHeight: LONG, pub lfWidth: LONG, pub lfEscapement: LONG, pub lfOrientation: LONG,
     pub lfWeight: LONG, pub lfItalic: u8, pub lfUnderline: u8, pub lfStrikeOut: u8,
@@ -156,6 +164,37 @@ pub struct NONCLIENTMETRICSW {
 
 #[repr(C)]
 pub struct INITCOMMONCONTROLSEX { pub dwSize: u32, pub dwICC: u32 }
+
+#[repr(C)]
+pub struct NMHDR { pub hwndFrom: HWND, pub idFrom: usize, pub code: u32 }
+
+#[repr(C)]
+pub struct SCROLLINFO {
+    pub cbSize: u32, pub fMask: u32, pub nMin: i32, pub nMax: i32,
+    pub nPage: u32, pub nPos: i32, pub nTrackPos: i32,
+}
+
+#[repr(C)]
+pub struct NMCUSTOMDRAW {
+    pub hdr: NMHDR, pub dwDrawStage: u32, pub hdc: HDC, pub rc: RECT,
+    pub dwItemSpec: usize, pub uItemState: u32, pub lItemlParam: LPARAM,
+}
+
+#[repr(C)]
+pub struct DRAWITEMSTRUCT {
+    pub CtlType: u32, pub CtlID: u32, pub itemID: u32, pub itemAction: u32,
+    pub itemState: u32, pub hwndItem: HWND, pub hDC: HDC, pub rcItem: RECT,
+    pub itemData: usize,
+}
+
+#[repr(C)]
+pub struct MEASUREITEMSTRUCT {
+    pub CtlType: u32, pub CtlID: u32, pub itemID: u32,
+    pub itemWidth: u32, pub itemHeight: u32, pub itemData: usize,
+}
+
+#[repr(C)]
+pub struct HIGHCONTRASTW { pub cbSize: u32, pub dwFlags: u32, pub lpszDefaultScheme: *mut u16 }
 
 #[repr(C)]
 pub struct PAINTSTRUCT {
@@ -191,6 +230,16 @@ pub const WM_CLOSE: u32 = 0x0010;
 pub const WM_PAINT: u32 = 0x000F;
 pub const WM_ERASEBKGND: u32 = 0x0014;
 pub const WM_SETTINGCHANGE: u32 = 0x001A;
+pub const WM_ENDSESSION: u32 = 0x0016;
+pub const WM_THEMECHANGED: u32 = 0x031A;
+pub const WM_SYSCOLORCHANGE: u32 = 0x0015;
+pub const WM_NOTIFY: u32 = 0x004E;
+pub const WM_DRAWITEM: u32 = 0x002B;
+pub const WM_MEASUREITEM: u32 = 0x002C;
+pub const WM_PRINT: u32 = 0x0317;
+pub const WM_CTLCOLORBTN: u32 = 0x0135;
+pub const WM_CTLCOLOREDIT: u32 = 0x0133;
+pub const WM_CTLCOLORLISTBOX: u32 = 0x0134;
 pub const WM_ACTIVATEAPP: u32 = 0x001C;
 pub const WM_SETCURSOR: u32 = 0x0020;
 pub const WM_KEYDOWN: u32 = 0x0100;
@@ -341,7 +390,7 @@ pub const CBN_SELCHANGE: u32 = 1;
 pub const BN_CLICKED: u32 = 0;
 
 // registry
-pub const HKEY_CURRENT_USER: HKEY = 0x8000_0001usize as *mut c_void;
+pub const HKEY_CURRENT_USER: HKEY = 0x8000_0001u32 as i32 as isize as HKEY;
 pub const REG_SZ: u32 = 1;
 pub const KEY_SET_VALUE: u32 = 0x2002;
 pub const ERROR_SUCCESS: u32 = 0;
@@ -447,6 +496,7 @@ extern "system" {
                         uFlags: u32) -> BOOL;
     pub fn GetWindowRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
     pub fn GetClientRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
+    pub fn ClientToScreen(hWnd: HWND, point: *mut POINT) -> BOOL;
     pub fn SystemParametersInfoW(uiAction: u32, uiParam: u32, pvParam: *mut c_void,
                                  fWinIni: u32) -> BOOL;
     pub fn LoadCursorW(hInstance: HINSTANCE, lpCursorName: *const u16) -> HCURSOR;
@@ -465,6 +515,9 @@ extern "system" {
     pub fn EndPaint(hWnd: HWND, lpPaint: *const PAINTSTRUCT) -> BOOL;
     pub fn FillRect(hDC: HDC, lprc: *const RECT, hbr: HBRUSH) -> i32;
     pub fn InvalidateRect(hWnd: HWND, lpRect: *const RECT, bErase: BOOL) -> BOOL;
+    pub fn UpdateWindow(hWnd: HWND) -> BOOL;
+    pub fn GetUpdateRect(hWnd: HWND, rect: *mut RECT, erase: BOOL) -> BOOL;
+    pub fn ValidateRect(hWnd: HWND, rect: *const RECT) -> BOOL;
     pub fn IsDialogMessageW(hDlg: HWND, lpMsg: *mut MSG) -> BOOL;
     pub fn GetSystemMetrics(nIndex: i32) -> i32;
     pub fn MapVirtualKeyW(uCode: u32, uMapType: u32) -> u32;
@@ -474,6 +527,17 @@ extern "system" {
         dwData: LPARAM) -> BOOL;
     pub fn GetMonitorInfoW(hMonitor: *mut c_void, lpmi: *mut MONITORINFOEXW) -> BOOL;
     pub fn SetWindowTextW(hWnd: HWND, lpString: *const u16) -> BOOL;
+    pub fn GetWindowTextW(hWnd: HWND, lpString: *mut u16, nMaxCount: i32) -> i32;
+    pub fn SetFocus(hWnd: HWND) -> HWND;
+    pub fn GetFocus() -> HWND;
+    pub fn SetScrollInfo(hWnd: HWND, bar: i32, info: *const SCROLLINFO, redraw: BOOL) -> i32;
+    pub fn GetScrollInfo(hWnd: HWND, bar: i32, info: *mut SCROLLINFO) -> BOOL;
+    pub fn ScrollWindowEx(hWnd: HWND, dx: i32, dy: i32, scroll: *const RECT, clip: *const RECT,
+                         region: HANDLE, update: *mut RECT, flags: u32) -> i32;
+    pub fn GetSysColor(index: i32) -> COLORREF;
+    pub fn FrameRect(hdc: HDC, rect: *const RECT, brush: HBRUSH) -> i32;
+    pub fn DrawFocusRect(hdc: HDC, rect: *const RECT) -> BOOL;
+    pub fn DrawFrameControl(hdc: HDC, rect: *mut RECT, kind: u32, state: u32) -> BOOL;
     pub fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) -> LONG_PTR;
     pub fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: LONG_PTR) -> LONG_PTR;
 }
@@ -492,10 +556,17 @@ extern "system" {
     pub fn CreateFontIndirectW(lf: *const LOGFONTW) -> HFONT;
     pub fn SetTextColor(hdc: HDC, color: COLORREF) -> COLORREF;
     pub fn SetBkColor(hdc: HDC, color: COLORREF) -> COLORREF;
+    pub fn SetDCBrushColor(hdc: HDC, color: COLORREF) -> COLORREF;
     pub fn SetBkMode(hdc: HDC, mode: i32) -> i32;
     pub fn DrawTextW(hdc: HDC, lpchText: *const u16, cchText: i32, lprc: *mut RECT, format: u32) -> i32;
     pub fn CreateSolidBrush(color: COLORREF) -> HBRUSH;
+    pub fn GetStockObject(index: i32) -> HGDIOBJ;
+    pub fn RoundRect(hdc: HDC, left: i32, top: i32, right: i32, bottom: i32, width: i32, height: i32) -> BOOL;
+    pub fn Ellipse(hdc: HDC, left: i32, top: i32, right: i32, bottom: i32) -> BOOL;
     pub fn GetDeviceCaps(hdc: HDC, index: i32) -> i32;
+    pub fn SaveDC(hdc: HDC) -> i32;
+    pub fn RestoreDC(hdc: HDC, saved: i32) -> BOOL;
+    pub fn GdiFlush() -> BOOL;
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +584,8 @@ extern "system" {
 // ---------------------------------------------------------------------------
 #[link(name = "advapi32")]
 extern "system" {
+    pub fn RegGetValueW(hKey: HKEY, subKey: *const u16, value: *const u16,
+                        flags: u32, kind: *mut u32, data: *mut c_void, size: *mut u32) -> i32;
     pub fn RegCreateKeyExW(hKey: HKEY, lpSubKey: *const u16, Reserved: u32, lpClass: *const u16,
                            dwOptions: u32, samDesired: u32, lpSecurityAttributes: *const c_void,
                            phkResult: *mut HKEY, lpdwDisposition: *mut u32) -> i32;
@@ -528,6 +601,7 @@ extern "system" {
 #[link(name = "comdlg32")]
 extern "system" {
     pub fn GetOpenFileNameW(lpofn: *mut OPENFILENAMEW) -> BOOL;
+    pub fn ChooseColorW(color: *mut CHOOSECOLORW) -> BOOL;
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +610,9 @@ extern "system" {
 #[link(name = "comctl32")]
 extern "system" {
     pub fn InitCommonControlsEx(picce: *const INITCOMMONCONTROLSEX) -> BOOL;
+    pub fn SetWindowSubclass(hwnd: HWND, procedure: SUBCLASSPROC, id: usize, data: usize) -> BOOL;
+    pub fn RemoveWindowSubclass(hwnd: HWND, procedure: SUBCLASSPROC, id: usize) -> BOOL;
+    pub fn DefSubclassProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT;
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +627,20 @@ extern "system" {
     pub fn GdipGetImageWidth(image: *mut c_void, width: *mut u32) -> i32;
     pub fn GdipGetImageHeight(image: *mut c_void, height: *mut u32) -> i32;
     pub fn GdipDisposeImage(image: *mut c_void) -> i32;
+    pub fn GdipCreateFromHDC(dc: HDC, graphics: *mut *mut c_void) -> i32;
+    pub fn GdipDeleteGraphics(graphics: *mut c_void) -> i32;
+    pub fn GdipSetSmoothingMode(graphics: *mut c_void, mode: i32) -> i32;
+    pub fn GdipSetPixelOffsetMode(graphics: *mut c_void, mode: i32) -> i32;
+    pub fn GdipCreateSolidFill(color: u32, brush: *mut *mut c_void) -> i32;
+    pub fn GdipDeleteBrush(brush: *mut c_void) -> i32;
+    pub fn GdipFillEllipse(graphics: *mut c_void, brush: *mut c_void,
+                           x: f32, y: f32, width: f32, height: f32) -> i32;
+    pub fn GdipCreatePath(fill_mode: i32, path: *mut *mut c_void) -> i32;
+    pub fn GdipDeletePath(path: *mut c_void) -> i32;
+    pub fn GdipAddPathArc(path: *mut c_void, x: f32, y: f32, width: f32, height: f32,
+                          start: f32, sweep: f32) -> i32;
+    pub fn GdipClosePathFigure(path: *mut c_void) -> i32;
+    pub fn GdipFillPath(graphics: *mut c_void, brush: *mut c_void, path: *mut c_void) -> i32;
 }
 
 // GdipLockBits / GdipUnlockBits are missing from some import libraries
@@ -581,12 +672,23 @@ pub fn SetProcessDpiAware_dyn() -> Option<unsafe extern "system" fn() -> BOOL> {
     }
 }
 
+#[link(name = "uxtheme")]
+extern "system" {
+    pub fn SetWindowTheme(hwnd: HWND, subApp: *const u16, subId: *const u16) -> i32;
+    pub fn OpenThemeData(hwnd: HWND, class: *const u16) -> HANDLE;
+    pub fn CloseThemeData(theme: HANDLE) -> i32;
+    pub fn DrawThemeBackground(theme: HANDLE, dc: HDC, part: i32, state: i32,
+                                rect: *const RECT, clip: *const RECT) -> i32;
+}
+
 // ---------------------------------------------------------------------------
 // dwmapi
 // ---------------------------------------------------------------------------
 #[link(name = "dwmapi")]
 extern "system" {
     pub fn DwmSetWindowAttribute(hwnd: HWND, attribute: u32, pvAttribute: *const c_void,
+                                 cbAttribute: u32) -> i32;
+    pub fn DwmGetWindowAttribute(hwnd: HWND, attribute: u32, pvAttribute: *mut c_void,
                                  cbAttribute: u32) -> i32;
 }
 

@@ -13,16 +13,18 @@ pub const TRAY_UID: u32 = 1;
 pub const ID_TOGGLE: u32 = 2001;
 pub const ID_TEX_FIRST: u32 = 2101;
 pub const ID_TEX_CUSTOM: u32 = ID_TEX_FIRST + TEXTURE_KINDS.len() as u32 - 1;
-pub const ID_OPACITY_FIRST: u32 = 2201; // 10%,20%,...,90% -> 2201..2209
+pub const ID_OPACITY_FIRST: u32 = 2201; // 10%,20%,...,100% -> 2201..2210
 pub const ID_MON_FIRST: u32 = 2300; // + index
 pub const ID_SETTINGS: u32 = 2401;
 pub const ID_AUTOSTART: u32 = 2402;
-pub const ID_WATERMARK: u32 = 2406;
-pub const ID_DARKMODE: u32 = 2403;
+pub const ID_THEME_FIRST: u32 = 2420;
 pub const ID_ABOUT: u32 = 2404;
 pub const ID_EXIT: u32 = 2405;
 pub const ID_LANG_ZH: u32 = 2410;
 pub const ID_LANG_EN: u32 = 2411;
+pub const ID_FILTER_TOGGLE: u32 = 2450;
+pub const ID_FILTER_FIRST: u32 = 2460;
+pub const ID_FILTER_DEPTH_FIRST: u32 = 2470;
 
 // ---------------------------------------------------------------------------
 // Icon add / modify / remove
@@ -44,9 +46,11 @@ unsafe fn fill_nid(nid: &mut NOTIFYICONDATAW, hwnd: HWND, icon: HICON) {
 unsafe fn tray_tip_text() -> String {
     let app = APP().get();
     let state = if app.cfg.enabled { app.cfg.text("已开启", "ON") } else { app.cfg.text("已关闭", "OFF") };
-    let mut t = format!("PaperGrain - {} ({})", state, app.cfg.hotkey_display());
+    let filter = if app.cfg.filter_active() { app.cfg.text("开", "ON") } else { app.cfg.text("关", "OFF") };
+    let status = format!("{} {} | {} {}", app.cfg.text("纸纹", "Paper"), state, app.cfg.text("滤镜", "Tint"), filter);
+    let mut t = format!("PaperGrain - {} ({})", status, app.cfg.hotkey_display());
     if !app.hotkey_registered {
-        t = format!("PaperGrain - {} ({})", state, app.cfg.text("快捷键不可用", "hotkey unavailable"));
+        t = format!("PaperGrain - {} ({})", status, app.cfg.text("快捷键不可用", "hotkey unavailable"));
     }
     if t.chars().count() > 60 {
         t = app.cfg.text("PaperGrain - 屏幕纸纹", "PaperGrain - paper texture overlay").into();
@@ -114,7 +118,9 @@ pub unsafe fn build_tray_menu() -> HMENU {
     let tex_labels = &app.cfg.texture_labels()[..TEXTURE_KINDS.len() - 1];
 
     append(m, MF_STRING | if app.cfg.enabled { MF_CHECKED } else { 0 },
-           ID_TOGGLE as usize, app.cfg.text("启用纸纹", "Enabled (overlay on)"));
+           ID_TOGGLE as usize, app.cfg.text("启用纸纹", "Enable paper texture"));
+    append(m, MF_STRING | if app.cfg.filter_enabled { MF_CHECKED } else { 0 },
+           ID_FILTER_TOGGLE as usize, app.cfg.text("启用色彩滤镜", "Enable color filter"));
     append(m, MF_SEPARATOR, 0, "");
 
     // Texture submenu
@@ -135,19 +141,39 @@ pub unsafe fn build_tray_menu() -> HMENU {
     CheckMenuRadioItem(tex, ID_TEX_FIRST, ID_TEX_CUSTOM, sel_id, MF_BYCOMMAND);
     append(m, MF_POPUP, tex as usize, app.cfg.text("纸张纹理", "Texture"));
 
+    let filter = CreatePopupMenu();
+    for (index, label) in app.cfg.filter_labels().iter().enumerate() {
+        append(filter, MF_STRING, (ID_FILTER_FIRST + index as u32) as usize, label);
+    }
+    let selected = FILTER_KINDS.iter().position(|kind| *kind == app.cfg.filter_kind).unwrap_or(0) as u32;
+    CheckMenuRadioItem(filter, ID_FILTER_FIRST, ID_FILTER_FIRST + 3, ID_FILTER_FIRST + selected, MF_BYCOMMAND);
+    append(filter, MF_SEPARATOR, 0, "");
+    let depth = CreatePopupMenu();
+    append(depth, MF_STRING | MF_GRAYED, 0,
+           &format!("{}: {}%", app.cfg.text("当前", "Current"), app.cfg.filter_depth));
+    for index in 0..5 {
+        append(depth, MF_STRING, (ID_FILTER_DEPTH_FIRST + index) as usize, &format!("{}%", index * 25));
+    }
+    if app.cfg.filter_depth % 25 == 0 {
+        CheckMenuRadioItem(depth, ID_FILTER_DEPTH_FIRST, ID_FILTER_DEPTH_FIRST + 4,
+                          ID_FILTER_DEPTH_FIRST + app.cfg.filter_depth / 25, MF_BYCOMMAND);
+    }
+    append(filter, MF_POPUP, depth as usize, app.cfg.text("颜色深度", "Color depth"));
+    append(m, MF_POPUP, filter as usize, app.cfg.text("色彩滤镜", "Color filter"));
+
     // Opacity submenu
     let op = CreatePopupMenu();
     append(op, MF_STRING | MF_GRAYED, 0,
            &format!("{}: {}%", app.cfg.text("当前", "Current"), app.cfg.opacity));
     append(op, MF_SEPARATOR, 0, "");
-    for i in 0..9u32 {
+    for i in 0..10u32 {
         let v = (i + 1) * 10;
         append(op, MF_STRING, (ID_OPACITY_FIRST + i) as usize, &format!("{}%", v));
     }
-    let exact = app.cfg.opacity % 10 == 0 && (10..=90).contains(&app.cfg.opacity);
+    let exact = app.cfg.opacity % 10 == 0 && (10..=100).contains(&app.cfg.opacity);
     if exact {
         let idx = app.cfg.opacity / 10 - 1;
-        CheckMenuRadioItem(op, ID_OPACITY_FIRST, ID_OPACITY_FIRST + 8,
+        CheckMenuRadioItem(op, ID_OPACITY_FIRST, ID_OPACITY_FIRST + 9,
                            ID_OPACITY_FIRST + idx, MF_BYCOMMAND);
     }
     append(m, MF_POPUP, op as usize, app.cfg.text("不透明度", "Opacity"));
@@ -181,10 +207,13 @@ pub unsafe fn build_tray_menu() -> HMENU {
     append(m, MF_POPUP, language as usize, app.cfg.text("语言", "Language"));
     append(m, MF_STRING | if app.cfg.auto_start { MF_CHECKED } else { 0 },
            ID_AUTOSTART as usize, app.cfg.text("开机自动启动", "Run at startup"));
-    append(m, MF_STRING | if app.cfg.show_watermark { MF_CHECKED } else { 0 },
-           ID_WATERMARK as usize, app.cfg.text("显示水印", "Show watermark"));
-    append(m, MF_STRING | if app.cfg.dark_mode { MF_CHECKED } else { 0 },
-           ID_DARKMODE as usize, app.cfg.text("设置窗口使用深色主题", "Dark settings theme"));
+    let theme = CreatePopupMenu();
+    for (index, label) in app.cfg.theme_labels().iter().enumerate() {
+        append(theme, MF_STRING, (ID_THEME_FIRST + index as u32) as usize, label);
+    }
+    let selected = THEME_KINDS.iter().position(|id| *id == app.cfg.theme).unwrap_or(0) as u32;
+    CheckMenuRadioItem(theme, ID_THEME_FIRST, ID_THEME_FIRST + 2, ID_THEME_FIRST + selected, MF_BYCOMMAND);
+    append(m, MF_POPUP, theme as usize, app.cfg.text("外观", "Appearance"));
     append(m, MF_SEPARATOR, 0, "");
     append(m, MF_STRING, ID_ABOUT as usize, app.cfg.text("关于 PaperGrain", "About PaperGrain"));
     append(m, MF_STRING, ID_EXIT as usize, app.cfg.text("退出", "Exit"));

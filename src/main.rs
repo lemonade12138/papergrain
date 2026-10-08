@@ -6,6 +6,7 @@
 #![allow(static_mut_refs)]
 
 mod config;
+mod color_filter;
 mod noise;
 mod overlay;
 mod panel;
@@ -41,11 +42,12 @@ pub struct App {
     pub hwnd_panel: HWND,
     pub overlays: Vec<Overlay>,
     pub custom: Option<textures::CustomImage>,
-    pub stamp: Option<overlay::Stamp>,
 
     pub screen_dc: HDC,
     pub msg_font: HFONT,
     pub brush_panel: HBRUSH,
+    pub brush_control: HBRUSH,
+    pub panel_theme: panel::PanelTheme,
     pub tray_icon: HICON,
     pub app_icon: HICON,
     pub mutex: HANDLE,
@@ -61,8 +63,15 @@ pub struct App {
     pub pnl_file_lbl: HWND,
     pub pnl_op_lbl: HWND,
     pub pnl_int_lbl: HWND,
+    pub pnl_filter_lbl: HWND,
     pub pnl_hotkey_lbl: HWND,
     pub pnl_hotkey_btn: HWND,
+    pub filter_dialog_colors: [COLORREF; 16],
+    pub panel_more: bool,
+    pub panel_fonts: [HFONT; 4],
+    pub panel_scroll: i32,
+    pub panel_content_height: i32,
+    pub panel_test_scale: f32,
 }
 
 pub static mut APP_STATE: Option<App> = None;
@@ -89,6 +98,7 @@ impl AppRef {
 
 impl App {
     pub fn panel_scale(&self) -> f32 {
+        if self.smoke && self.panel_test_scale > 0.0 { return self.panel_test_scale; }
         let dpi = if self.hwnd_panel != core::ptr::null_mut() {
             unsafe { GetDpiForWindow(self.hwnd_panel) }
         } else { 0 };
@@ -114,8 +124,10 @@ impl App {
     pub fn set_enabled(&mut self, on: bool) {
         self.cfg.enabled = on;
         self.save_config_soon();
+        unsafe { self.render_all() };
         unsafe { self.apply_visibility() };
         unsafe { tray::tray_update_tip(self.hwnd_main) };
+        unsafe { panel::panel_refresh_effects() };
     }
 
     pub fn toggle(&mut self) {
@@ -123,16 +135,15 @@ impl App {
     }
 
     pub unsafe fn apply_visibility(&mut self) {
-        let enabled = self.cfg.enabled;
         for o in self.overlays.iter_mut() {
-            let mon_on = self.cfg.monitor_enabled(&o.device);
-            let show = enabled && mon_on;
+            let show = self.cfg.overlay_enabled(&o.device) && !self.smoke;
             if show {
                 ShowWindow(o.hwnd, SW_SHOWNOACTIVATE);
             } else {
                 ShowWindow(o.hwnd, SW_HIDE);
             }
         }
+        panel::panel_raise();
     }
 
     pub unsafe fn set_texture(&mut self, kind: &str) {
@@ -154,12 +165,23 @@ impl App {
         }
     }
 
+    pub unsafe fn set_theme(&mut self, theme: &str) {
+        if !self.cfg.set_theme(theme) { return; }
+        self.save_config_soon();
+        if !self.hwnd_panel.is_null() {
+            PostMessageW(self.hwnd_panel, panel::WM_APPEARANCE_CHANGED, 0, 0);
+        } else {
+            self.panel_theme = panel::PanelTheme::from_config(&self.cfg);
+        }
+    }
+
     pub unsafe fn set_opacity(&mut self, v: u32) {
-        let v = v.clamp(10, 90);
+        let v = v.clamp(10, 100);
         if v == self.cfg.opacity { return; }
         self.cfg.opacity = v;
         self.save_config_soon();
         self.render_all();
+        panel::panel_refresh_effects();
     }
 
     pub unsafe fn set_intensity(&mut self, v: u32) {
@@ -171,22 +193,50 @@ impl App {
         self.render_all();
     }
 
+    pub unsafe fn set_filter_enabled(&mut self, on: bool) {
+        if self.cfg.filter_enabled == on { return; }
+        self.cfg.filter_enabled = on;
+        self.filter_changed();
+    }
+
+    pub unsafe fn set_filter_kind(&mut self, kind: &str) {
+        if self.cfg.set_filter_kind(kind) { self.filter_changed(); }
+    }
+
+    pub unsafe fn set_filter_depth(&mut self, depth: u32) {
+        let depth = depth.min(100);
+        if self.cfg.filter_depth == depth { return; }
+        self.cfg.filter_depth = depth;
+        self.filter_changed();
+    }
+
+    pub unsafe fn set_custom_filter_color(&mut self, selection: Option<COLORREF>) {
+        let Some(color) = selection else { return; };
+        self.cfg.filter_custom_color = color & 0xFFFFFF;
+        self.cfg.set_filter_kind("custom");
+        self.filter_changed();
+    }
+
+    unsafe fn filter_changed(&mut self) {
+        self.save_config_soon();
+        self.render_all();
+        self.apply_visibility();
+        tray::tray_update_tip(self.hwnd_main);
+        panel::panel_refresh_effects();
+    }
+
     pub unsafe fn set_monitor(&mut self, device: &str, on: bool) {
         self.cfg.set_monitor(device, on);
         self.save_config_soon();
         self.apply_visibility();
-    }
-
-    pub unsafe fn set_watermark(&mut self, on: bool) {
-        self.cfg.show_watermark = on;
-        self.save_config_soon();
-        self.render_all();
+        panel::panel_refresh_effects();
     }
 
     pub unsafe fn set_autostart(&mut self, on: bool) {
         self.cfg.auto_start = on;
         self.save_config_soon();
-        apply_registry_autostart(on);
+        if !self.smoke { apply_registry_autostart(on); }
+        panel::panel_refresh_effects();
     }
 
     pub unsafe fn mark_all_masters_dirty(&mut self) {
@@ -278,11 +328,13 @@ impl App {
         self.cfg.first_run = first_run;
         self.save_config_soon();
         // hotkey
-        UnregisterHotKey(self.hwnd_main, 1);
-        self.hotkey_registered = RegisterHotKey(
-            self.hwnd_main, 1,
-            self.cfg.hotkey_mods | MOD_NOREPEAT, self.cfg.hotkey_vk) != 0;
-        apply_registry_autostart(self.cfg.auto_start);
+        if !self.smoke {
+            UnregisterHotKey(self.hwnd_main, 1);
+            self.hotkey_registered = RegisterHotKey(
+                self.hwnd_main, 1,
+                self.cfg.hotkey_mods | MOD_NOREPEAT, self.cfg.hotkey_vk) != 0;
+            apply_registry_autostart(self.cfg.auto_start);
+        }
         self.mark_all_masters_dirty();
         self.render_all();
         self.apply_visibility();
@@ -434,6 +486,7 @@ unsafe extern "system" fn main_wndproc(
                                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                         }
                     }
+                    panel::panel_raise();
                 }
                 TIMER_SAVECFG => {
                     let app = APP().get();
@@ -470,6 +523,7 @@ unsafe extern "system" fn main_wndproc(
             0
         }
         WM_SETTINGCHANGE => {
+            panel::panel_refresh_system_theme();
             // explorer restarted? taskbar may have dropped our icon
             if lparam != 0 {
                 let p = lparam as *const u16;
@@ -487,6 +541,10 @@ unsafe extern "system" fn main_wndproc(
                     tray::tray_add(app.hwnd_main, app.tray_icon);
                 }
             }
+            0
+        }
+        WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+            panel::panel_refresh_system_theme();
             0
         }
         WM_DESTROY => {
@@ -544,22 +602,20 @@ unsafe fn dispatch_tray_command(cmd: u32) {
             let on = !app.cfg.auto_start;
             app.set_autostart(on);
         }
-        tray::ID_WATERMARK => {
-            let on = !app.cfg.show_watermark;
-            app.set_watermark(on);
-        }
-        tray::ID_DARKMODE => {
-            app.cfg.dark_mode = !app.cfg.dark_mode;
-            app.save_config_soon();
-            panel::panel_apply_theme();
-            if app.hwnd_panel != core::ptr::null_mut()
-                && IsWindowVisible(app.hwnd_panel) != 0 {
-                panel::panel_rebuild();
-            }
-        }
+        tray::ID_FILTER_TOGGLE => app.set_filter_enabled(!app.cfg.filter_enabled),
         _ => {
+            if (tray::ID_THEME_FIRST..tray::ID_THEME_FIRST + config::THEME_KINDS.len() as u32).contains(&cmd) {
+                app.set_theme(config::THEME_KINDS[(cmd - tray::ID_THEME_FIRST) as usize]);
+            }
+            else if (tray::ID_FILTER_FIRST..tray::ID_FILTER_FIRST + config::FILTER_KINDS.len() as u32).contains(&cmd) {
+                let kind = config::FILTER_KINDS[(cmd - tray::ID_FILTER_FIRST) as usize];
+                if kind == "custom" { panel::choose_filter_color(); } else { app.set_filter_kind(kind); }
+            }
+            else if (tray::ID_FILTER_DEPTH_FIRST..tray::ID_FILTER_DEPTH_FIRST + 5).contains(&cmd) {
+                app.set_filter_depth((cmd - tray::ID_FILTER_DEPTH_FIRST) * 25);
+            }
             // textures
-            if (tray::ID_TEX_FIRST..=tray::ID_TEX_CUSTOM).contains(&cmd) {
+            else if (tray::ID_TEX_FIRST..=tray::ID_TEX_CUSTOM).contains(&cmd) {
                 let idx = (cmd - tray::ID_TEX_FIRST) as usize;
                 if idx < config::TEXTURE_KINDS.len() {
                     let kind = config::TEXTURE_KINDS[idx];
@@ -574,7 +630,7 @@ unsafe fn dispatch_tray_command(cmd: u32) {
                 }
             }
             // opacity presets
-            else if (tray::ID_OPACITY_FIRST..=tray::ID_OPACITY_FIRST + 8)
+            else if (tray::ID_OPACITY_FIRST..=tray::ID_OPACITY_FIRST + 9)
                 .contains(&cmd) {
                 let v = (cmd - tray::ID_OPACITY_FIRST + 1) * 10;
                 app.set_opacity(v);
@@ -688,7 +744,8 @@ fn ensure_dirs(appdata: &str) -> (String, String) {
 
 fn main() {
     unsafe {
-        let smoke = std::env::args().any(|a| a == "--smoke");
+        let smoke_panel = std::env::args().find_map(|a| a.strip_prefix("--smoke-panel=").map(str::to_string));
+        let smoke = smoke_panel.is_some() || std::env::args().any(|a| a == "--smoke");
 
         let (config_path, tex_dir) = match config::appdata_dir() {
             Some(ad) => ensure_dirs(&ad),
@@ -707,7 +764,7 @@ fn main() {
         }
 
         // single instance
-        let mutex_name = wide("Local\\PaperGrainSingleton");
+        let mutex_name = wide(if smoke { "Local\\PaperGrainSmokeSingleton" } else { "Local\\PaperGrainSingleton" });
         let mutex = CreateMutexW(core::ptr::null(), 1, mutex_name.as_ptr());
         let already = mutex != core::ptr::null_mut()
             && GetLastError() == 183; // ERROR_ALREADY_EXISTS
@@ -741,20 +798,22 @@ fn main() {
 
         // app state (before any window creation)
         let inst = GetModuleHandleW(core::ptr::null_mut());
+        let panel_theme = panel::PanelTheme::from_config(&cfg);
         let app = App {
             cfg,
             config_path,
             tex_dir,
-            config_dirty: true, // Persist the language default for older settings.
+            config_dirty: true, // Persist defaults when migrating older settings.
             smoke,
             hwnd_main: core::ptr::null_mut(),
             hwnd_panel: core::ptr::null_mut(),
             overlays: Vec::new(),
             custom: None,
-            stamp: None,
             screen_dc: GetDC(core::ptr::null_mut()),
             msg_font: core::ptr::null_mut(),
             brush_panel: core::ptr::null_mut(),
+            brush_control: core::ptr::null_mut(),
+            panel_theme,
             tray_icon: core::ptr::null_mut(),
             app_icon: core::ptr::null_mut(),
             mutex,
@@ -767,8 +826,18 @@ fn main() {
             pnl_file_lbl: core::ptr::null_mut(),
             pnl_op_lbl: core::ptr::null_mut(),
             pnl_int_lbl: core::ptr::null_mut(),
+            pnl_filter_lbl: core::ptr::null_mut(),
             pnl_hotkey_lbl: core::ptr::null_mut(),
             pnl_hotkey_btn: core::ptr::null_mut(),
+            filter_dialog_colors: [RGB(255, 255, 255); 16],
+            panel_more: false,
+            panel_fonts: [core::ptr::null_mut(); 4],
+            panel_scroll: 0,
+            panel_content_height: 0,
+            panel_test_scale: if smoke {
+                std::env::args().find_map(|arg| arg.strip_prefix("--smoke-scale=").and_then(|s| s.parse::<f32>().ok()))
+                    .filter(|scale| scale.is_finite()).unwrap_or(1.0).clamp(1.0, 3.2)
+            } else { 0.0 },
         };
         APP_STATE = Some(app);
         let app = APP().get();
@@ -826,9 +895,19 @@ fn main() {
         }
 
         // persist startup state (also writes config on first run)
-        if app.cfg.auto_start {
+        if app.cfg.auto_start && !smoke {
             apply_registry_autostart(true);
         }
+
+        let smoke_ok = if let Some(path) = smoke_panel {
+            match panel::panel_smoke_check(&path) {
+                Ok(()) => true,
+                Err(error) => {
+                    let _ = std::fs::write(format!("{}.error.txt", path), error);
+                    false
+                }
+            }
+        } else { true };
 
         // timers
         SetTimer(app.hwnd_main, TIMER_TOPMOST, 2000, None);
@@ -855,6 +934,8 @@ fn main() {
             if !handled {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            } else {
+                panel::panel_keep_focus_visible();
             }
         }
 
@@ -874,10 +955,14 @@ fn main() {
         if app.hwnd_panel != core::ptr::null_mut() {
             DestroyWindow(app.hwnd_panel);
         }
+        for font in app.panel_fonts {
+            if !font.is_null() { DeleteObject(font as HGDIOBJ); }
+        }
         DestroyWindow(app.hwnd_main);
         if app.brush_panel != core::ptr::null_mut() {
             DeleteObject(app.brush_panel as HGDIOBJ);
         }
+        if !app.brush_control.is_null() { DeleteObject(app.brush_control as HGDIOBJ); }
         if app.msg_font != core::ptr::null_mut() {
             DeleteObject(app.msg_font as HGDIOBJ);
         }
@@ -891,5 +976,6 @@ fn main() {
             ReleaseMutex(app.mutex);
             CloseHandle(app.mutex);
         }
+        if !smoke_ok { std::process::exit(2); }
     }
 }

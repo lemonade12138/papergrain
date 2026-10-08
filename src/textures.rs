@@ -220,7 +220,7 @@ fn xuan_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
 }
 
 // ---------------------------------------------------------------------------
-// Matte offset-printing stock: compressed pulp and fine, low-contrast pores.
+// Matte offset-printing stock: visible warm-gray paper and compressed-pulp pores.
 fn offset_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
     for y in 0..h {
         let fy = y as f32 / s;
@@ -229,10 +229,12 @@ fn offset_paper(buf: &mut [u8], w: usize, h: usize, s: f32, inten: f32) {
             let formation = fbm(fx * 0.018, fy * 0.018, 2, 1101) - 0.5;
             let pulp = fbm(fx * 0.23, fy * 0.30, 2, 1102) - 0.5;
             let grain = fbm(fx * 0.90, fy * 0.90, 2, 1103) - 0.5;
-            let a = (26.0 + formation * 1.5 + pulp * 4.0 + grain * 16.0) * inten;
+            let a = (50.0 + formation * 6.0 + pulp * 20.0 + grain * 56.0)
+                .clamp(18.0, 72.0) * inten;
             let premul = a / 255.0;
-            put_px(buf, (y * w + x) * 4, 103.0 * premul, 111.0 * premul,
-                   116.0 * premul, a);
+            // A darker translucent pigment makes white paper visible without whitening black text.
+            put_px(buf, (y * w + x) * 4, 54.0 * premul, 70.0 * premul,
+                   84.0 * premul, a);
         }
     }
 }
@@ -369,23 +371,34 @@ mod tests {
     }
 
     #[test]
-    fn offset_paper_keeps_ink_dark_and_paper_grain_subtle() {
+    fn offset_paper_is_visible_after_opacity_scaling_and_keeps_ink_dark() {
         for dpi in [96, 192, 288] {
-            let pixels = generate("offset-paper", 128, 96, dpi, 100);
-            let mut darkest = 255;
-            let mut lightest = 0;
-            for p in pixels.chunks_exact(4) {
-                for c in &p[..3] {
-                    let white = *c as u16 + 255 - p[3] as u16;
-                    assert!(*c <= 20, "overlay washes out dark ink");
-                    assert!(white >= 228, "paper surface is too dark");
+            for (intensity, opacity, maximum_mean, minimum_grain) in
+                [(60, 0.35, 249.0, 4), (100, 0.90, 225.0, 18)] {
+                let pixels = generate("offset-paper", 128, 96, dpi, intensity);
+                let mut darkest = 255;
+                let mut lightest = 0;
+                let mut sum = 0u64;
+                for p in pixels.chunks_exact(4) {
+                    // Match render_overlay's premultiplied-channel rounding, then composite over white/black.
+                    let scaled = |c: u8| (c as f32 * opacity + 0.5) as u16;
+                    let alpha = scaled(p[3]);
+                    for c in &p[..3] {
+                        let ink = scaled(*c);
+                        let white = ink + 255 - alpha;
+                        assert!(ink <= 24, "overlay washes out dark ink");
+                        assert!(white >= 198, "paper surface is too dark");
+                    }
+                    let white = scaled(p[1]) + 255 - alpha;
+                    darkest = darkest.min(white);
+                    lightest = lightest.max(white);
+                    sum += white as u64;
                 }
-                let white = p[1] as u16 + 255 - p[3] as u16;
-                darkest = darkest.min(white);
-                lightest = lightest.max(white);
+                let mean = sum as f64 / (pixels.len() / 4) as f64;
+                assert!(mean <= maximum_mean, "paper is indistinguishable from white: {mean}");
+                assert!(lightest - darkest >= minimum_grain, "paper grain is too faint");
+                assert!(lightest - darkest <= 42, "grain is too high-contrast");
             }
-            assert!(lightest - darkest <= 14, "grain is too high-contrast");
-            assert!(lightest > darkest, "paper has no visible grain");
         }
     }
 }

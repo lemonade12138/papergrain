@@ -30,7 +30,6 @@ pub struct Overlay {
     pub mem_dc: HDC,
     pub dib: HBITMAP,
     pub bits: *mut u8,        // DIB bits (BGRA)
-    pub primary: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +128,6 @@ pub unsafe fn create_overlay(mon: &MonInfo) -> Overlay {
         mem_dc,
         dib: core::ptr::null_mut(),
         bits: core::ptr::null_mut(),
-        primary: mon.primary,
     };
     o.dpi = overlay_dpi(hwnd);
     ensure_dib(&mut o, w, h);
@@ -216,105 +214,9 @@ pub unsafe fn build_master(o: &Overlay) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Watermark stamp ("CookieFilled", 5% opacity, bottom-right)
-// ---------------------------------------------------------------------------
-pub struct Stamp {
-    pub dpi: u32,
-    pub w: usize,
-    pub h: usize,
-    pub data: Vec<u8>, // BGRA where alpha > 0 marks a set pixel
-}
-
-pub unsafe fn make_stamp(dpi: u32) -> Option<Stamp> {
-    let scale = (dpi as f32 / 96.0).clamp(1.0, 3.2);
-    let font_h = -(12.0 * scale).round() as i32;
-    let mut lf: LOGFONTW = std::mem::zeroed();
-    lf.lfHeight = font_h;
-    lf.lfWeight = 400;
-    lf.lfQuality = 5; // CLEARTYPE_QUALITY
-    crate::win32::copy_into_buf(&mut lf.lfFaceName, "Segoe UI");
-    let font = CreateFontIndirectW(&lf);
-    if font == core::ptr::null_mut() { return None; }
-
-    let screen_dc = GetDC(core::ptr::null_mut());
-    let hdc = CreateCompatibleDC(screen_dc);
-    ReleaseDC(core::ptr::null_mut(), screen_dc);
-    let old_font = SelectObject(hdc, font as HGDIOBJ);
-
-    // measure
-    let text = wide("CookieFilled");
-    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    DrawTextW(hdc, text.as_ptr(), -1, &mut rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-    let tw = rc.width().max(1);
-    let th = rc.height().max(1);
-
-    // draw white text on black into a temp DIB
-    let mut bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: tw, biHeight: -th, biPlanes: 1, biBitCount: 32,
-            biCompression: BI_RGB, biSizeImage: 0, biXPelsPerMeter: 0,
-            biYPelsPerMeter: 0, biClrUsed: 0, biClrImportant: 0,
-        },
-        bmiColors: [0],
-    };
-    bmi.bmiHeader.biSizeImage = (tw as usize * th as usize * 4) as u32;
-    let mut bits: *mut c_void = core::ptr::null_mut();
-    let dib = CreateDIBSection(core::ptr::null_mut(), &bmi, DIB_RGB_COLORS,
-                               &mut bits, core::ptr::null_mut(), 0);
-    if dib == core::ptr::null_mut() || bits == core::ptr::null_mut() {
-        SelectObject(hdc, old_font);
-        DeleteObject(font as HGDIOBJ);
-        DeleteDC(hdc);
-        return None;
-    }
-    let tdc = CreateCompatibleDC(hdc);
-    let old_bmp = SelectObject(tdc, dib as HGDIOBJ);
-    let old_tfont = SelectObject(tdc, font as HGDIOBJ);
-    let mut black = RECT { left: 0, top: 0, right: tw, bottom: th };
-    let black_brush = CreateSolidBrush(0);
-    FillRect(tdc, &black, black_brush);
-    DeleteObject(black_brush as HGDIOBJ);
-    SetTextColor(tdc, 0xFFFFFF);
-    SetBkColor(tdc, 0x000000);
-    SetBkMode(tdc, OPAQUE_BK);
-    DrawTextW(tdc, text.as_ptr(), -1, &mut black, DT_SINGLELINE | DT_NOPREFIX);
-
-    // read luminance -> stamp mask
-    let len = tw as usize * th as usize * 4;
-    let src = std::slice::from_raw_parts(bits as *const u8, len);
-    let mut data = vec![0u8; len];
-    let mut any = false;
-    for i in 0..(len / 4) {
-        let b = src[i * 4] as u32;
-        let g = src[i * 4 + 1] as u32;
-        let r = src[i * 4 + 2] as u32;
-        if r + g + b > 120 { // threshold on white text
-            data[i * 4] = 13; data[i * 4 + 1] = 13;
-            data[i * 4 + 2] = 13; data[i * 4 + 3] = 13; // 5% white
-            any = true;
-        }
-    }
-    SelectObject(tdc, old_bmp);
-    SelectObject(tdc, old_tfont);
-    SelectObject(hdc, old_font);
-    DeleteObject(dib as HGDIOBJ);
-    DeleteDC(tdc);
-    DeleteObject(font as HGDIOBJ);
-    DeleteDC(hdc);
-    if any {
-        Some(Stamp { dpi, w: tw as usize, h: th as usize, data })
-    } else {
-        None
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Rendering / presentation
 // ---------------------------------------------------------------------------
-/// Blend master (full opacity) into the DIB at `opacity` percent and push it
-/// to the screen with UpdateLayeredWindow. Also stamps the watermark when the
-/// overlay is the primary monitor.
+/// Compose the optional paper over the color tint and present the DIB.
 pub unsafe fn render_overlay(idx: usize) {
     {
         let app = APP().get();
@@ -331,7 +233,7 @@ pub unsafe fn render_overlay(idx: usize) {
     {
         let app = APP().get();
         let o = &mut app.overlays[idx];
-        if o.master.len() != w * h * 4 || o.master_dirty {
+        if app.cfg.enabled && (o.master.len() != w * h * 4 || o.master_dirty) {
             o.master = build_master(o);
             o.master_dirty = false;
         }
@@ -340,56 +242,17 @@ pub unsafe fn render_overlay(idx: usize) {
 
     // blend into the DIB
     let dib_len = w * h * 4;
-    let (bits, rect, primary, opacity, show_wm) = {
+    let (bits, rect) = {
         let app = APP().get();
         let o = &app.overlays[idx];
-        (o.bits, o.rect, o.primary, app.cfg.opacity as f32 / 100.0,
-         app.cfg.show_watermark && o.primary)
+        (o.bits, o.rect)
     };
     if bits == core::ptr::null_mut() { return; }
     let dst = std::slice::from_raw_parts_mut(bits, dib_len);
     {
         let app = APP().get();
         let master = &app.overlays[idx].master;
-        if master.len() != dib_len { return; }
-        for i in 0..dib_len {
-            let v = master[i] as f32 * opacity + 0.5;
-            dst[i] = if v > 255.0 { 255 } else { v as u8 };
-        }
-
-        // watermark on primary monitor only
-        if show_wm {
-            let dpi = app.overlays[idx].dpi;
-            let need_stamp = match &app.stamp {
-                Some(s) => s.dpi != dpi,
-                None => true,
-            };
-            if need_stamp {
-                app.stamp = make_stamp(dpi);
-            }
-            if let Some(st) = &app.stamp {
-                let margin = (16.0 * (dpi as f32 / 96.0).clamp(1.0, 3.2))
-                    .round() as usize;
-                if w > st.w + margin && h > st.h + margin {
-                    let y0 = h - margin - st.h;
-                    let x0 = w - margin - st.w;
-                    for sy in 0..st.h {
-                        let dy = y0 + sy;
-                        if dy >= h { break; }
-                        for sx in 0..st.w {
-                            let dx = x0 + sx;
-                            if dx >= w { break; }
-                            let sidx = (sy * st.w + sx) * 4;
-                            if st.data[sidx + 3] > 0 {
-                                let didx = (dy * w + dx) * 4;
-                                dst[didx] = 13; dst[didx + 1] = 13;
-                                dst[didx + 2] = 13; dst[didx + 3] = 13;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        crate::color_filter::compose(dst, master, &app.cfg);
     }
 
     // present
